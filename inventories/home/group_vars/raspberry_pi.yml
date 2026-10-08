@@ -1,7 +1,0 @@
----
-# raspberry_pi グループ共通の変数
-common_packages:
-  - vim
-  - git
-  - curl
-  - htop

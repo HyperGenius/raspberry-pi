@@ -1,0 +1,18 @@
+---
+# Macにマウントされた Raspberry Pi OS のブートパーティション
+bootfs_path: /Volumes/bootfs
+
+bootfs_hostname: "{{ hostname | default(inventory_hostname) }}"
+# cloud-init はこの値が変わらない限り再実行しない
+bootfs_instance_id: "{{ inventory_hostname }}"
+
+bootfs_user: "{{ ansible_user }}"
+bootfs_user_groups: users,adm,dialout,audio,netdev,video,plugdev,cdrom,games,input,gpio,spi,i2c,render,sudo
+bootfs_user_sudo: ALL=(ALL) NOPASSWD:ALL
+bootfs_user_password_hash: ""
+bootfs_ssh_authorized_keys: []
+
+bootfs_wifi_country: JP
+bootfs_wifi_ssid: ""
+bootfs_wifi_password: ""
+bootfs_wifi_hidden: false

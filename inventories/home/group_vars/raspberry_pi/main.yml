@@ -1,0 +1,16 @@
+---
+# raspberry_pi グループ共通の変数
+common_packages:
+  - vim
+  - git
+  - curl
+  - htop
+
+ansible_ssh_private_key_file: ~/.ssh/id_ed25519_rp4
+
+# bootfs（playbooks/prepare_sd.yml）で使う値。秘密情報は vault.yml で定義する。
+bootfs_ssh_authorized_keys:
+  - "{{ lookup('ansible.builtin.file', '~/.ssh/id_ed25519_rp4.pub') }}"
+bootfs_user_password_hash: "{{ vault_bootfs_user_password_hash }}"
+bootfs_wifi_ssid: "{{ vault_bootfs_wifi_ssid }}"
+bootfs_wifi_password: "{{ vault_bootfs_wifi_password }}"
