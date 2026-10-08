@@ -1,0 +1,4 @@
+---
+hostname: "{{ inventory_hostname }}"
+timezone: Etc/UTC
+common_packages: []
