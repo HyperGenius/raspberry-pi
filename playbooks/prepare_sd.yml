@@ -1,0 +1,11 @@
+---
+# Imagerで書き込んだSDカードのbootfsを、初回起動前にMac上で準備する。
+#   ansible-playbook playbooks/prepare_sd.yml -e target=rpi-01 --ask-vault-pass
+- name: Prepare bootfs on Mac
+  hosts: "{{ target }}"
+  connection: local
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  roles:
+    - bootfs

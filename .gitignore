@@ -2,3 +2,6 @@
 .vault_pass*
 *.secret.yml
 .DS_Store
+
+# ansible-vault の秘密情報（公開リポジトリのため暗号化済みでも含めない）
+vault.yml

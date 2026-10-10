@@ -1,0 +1,8 @@
+---
+# vault.yml の雛形。以下で暗号化したファイルを作成する（この .example は読み込まれない）。
+#   ansible-vault create inventories/home/group_vars/raspberry_pi/vault.yml
+#
+# パスワードハッシュの生成: openssl passwd -6
+vault_bootfs_user_password_hash: "$6$..."
+vault_bootfs_wifi_ssid: "your-ssid"
+vault_bootfs_wifi_password: "your-wifi-password"

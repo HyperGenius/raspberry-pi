@@ -1,0 +1,62 @@
+---
+- name: Validate target and required variables
+  ansible.builtin.assert:
+    that:
+      - ansible_play_hosts_all | length == 1
+      - bootfs_user_password_hash is match('^\$[0-9a-z]+\$')
+      - bootfs_ssh_authorized_keys | length > 0
+      - bootfs_wifi_ssid | length > 0
+      - bootfs_wifi_password | length >= 8
+    fail_msg: >-
+      target は1台だけ指定し、パスワードハッシュ・SSH公開鍵・Wi-Fi SSID/パスワード（8文字以上）を設定すること
+      （inventories/home/group_vars/raspberry_pi/vault.yml.example を参照）
+    quiet: true
+
+- name: Check that bootfs_path is a Raspberry Pi boot partition
+  ansible.builtin.stat:
+    path: "{{ bootfs_path }}/{{ item }}"
+  loop:
+    - cmdline.txt
+    - config.txt
+  register: bootfs_files
+
+- name: Fail if boot partition files are missing
+  ansible.builtin.assert:
+    that: bootfs_files.results | map(attribute='stat.exists') is all
+    fail_msg: "{{ bootfs_path }} に cmdline.txt / config.txt がない。bootfs_path を確認すること"
+    quiet: true
+
+# PARTUUID がイメージごとに異なるため、cmdline.txt は丸ごと管理せず resize だけを取り除く
+- name: Remove resize from cmdline.txt
+  ansible.builtin.replace:
+    path: "{{ bootfs_path }}/cmdline.txt"
+    regexp: '(^|\s+)resize(?=\s|$)'
+    replace: ""
+
+- name: Generate meta-data
+  ansible.builtin.template:
+    src: meta-data.j2
+    dest: "{{ bootfs_path }}/meta-data"
+
+- name: Generate user-data
+  ansible.builtin.template:
+    src: user-data.j2
+    dest: "{{ bootfs_path }}/user-data"
+  diff: false
+
+- name: Generate network-config
+  ansible.builtin.template:
+    src: network-config.j2
+    dest: "{{ bootfs_path }}/network-config"
+  diff: false
+
+- name: Read cmdline.txt
+  ansible.builtin.slurp:
+    src: "{{ bootfs_path }}/cmdline.txt"
+  register: bootfs_cmdline
+
+- name: Verify resize is removed from cmdline.txt
+  ansible.builtin.assert:
+    that: bootfs_cmdline.content | b64decode is not search('(^|\s)resize(\s|$)')
+    fail_msg: cmdline.txt に resize が残っている
+    quiet: true

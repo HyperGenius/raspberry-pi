@@ -1,0 +1,20 @@
+# roles/bootfs で生成。直接編集しないこと
+# 初回起動はDHCP。wlan0 の固定IP化は #1 のroleで行う
+network:
+  version: 2
+  renderer: NetworkManager
+  ethernets:
+    eth0:
+      dhcp4: true
+      optional: true
+  wifis:
+    wlan0:
+      dhcp4: true
+      regulatory-domain: {{ bootfs_wifi_country | to_json }}
+      access-points:
+        {{ bootfs_wifi_ssid | to_json }}:
+          password: {{ bootfs_wifi_password | to_json }}
+{% if bootfs_wifi_hidden %}
+          hidden: true
+{% endif %}
+      optional: true

@@ -1,5 +1,5 @@
 ---
 # 全ホスト共通の変数
-ansible_user: pi
+ansible_user: genius
 timezone: Asia/Tokyo
 locale: ja_JP.UTF-8

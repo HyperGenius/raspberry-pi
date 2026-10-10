@@ -1,0 +1,24 @@
+#cloud-config
+# roles/bootfs で生成。直接編集しないこと
+hostname: {{ bootfs_hostname | to_json }}
+manage_etc_hosts: true
+
+enable_ssh: true
+ssh_pwauth: false
+
+users:
+  - name: {{ bootfs_user | to_json }}
+    groups: {{ bootfs_user_groups | to_json }}
+    shell: /bin/bash
+    lock_passwd: false
+    passwd: {{ bootfs_user_password_hash | to_json }}
+    ssh_authorized_keys:
+{% for key in bootfs_ssh_authorized_keys %}
+      - {{ key | trim | to_json }}
+{% endfor %}
+    sudo: {{ bootfs_user_sudo | to_json }}
+
+# rootの自動拡張を止める（パーティション構成は #2 のroleで行う）
+growpart:
+  mode: "off"
+resize_rootfs: false
