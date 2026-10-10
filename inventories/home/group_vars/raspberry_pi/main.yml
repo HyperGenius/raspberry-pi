@@ -16,3 +16,5 @@ bootfs_ssh_authorized_keys:
 bootfs_user_password_hash: "{{ vault_bootfs_user_password_hash }}"
 bootfs_wifi_ssid: "{{ vault_bootfs_wifi_ssid }}"
 bootfs_wifi_password: "{{ vault_bootfs_wifi_password }}"
+# Aterm の ESS-ID ステルス機能（SSID 非通知）が有効なため、SSID を指定してプローブさせる
+bootfs_wifi_hidden: true

@@ -49,6 +49,11 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
    ```sh
    ansible-playbook playbooks/prepare_sd.yml -e target=rpi-01 --ask-vault-pass
    # bootfs のマウント先が異なる場合: -e bootfs_path=/Volumes/xxx
+
+   # 必ず取り出してから抜く（書き込みが反映されず、起動時に
+   # "Unable to read partition as FAT" で止まることがある）。
+   # ターミナルのカレントディレクトリが /Volumes/bootfs だと取り出せない
+   cd ~ && diskutil eject /Volumes/bootfs
    ```
 4. SD カードを取り出して Pi を起動する。初回は DHCP なので mDNS 名で接続する
    ```sh
