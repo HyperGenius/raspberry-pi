@@ -14,9 +14,9 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
 │       ├── group_vars/       # グループ共通の変数
 │       │   ├── all.yml
 │       │   └── raspberry_pi/
-│       │       ├── main.yml
-│       │       ├── vault.yml     # 秘密情報（ansible-vault で暗号化、Git 管理外）
-│       │       └── vault.yml.example
+│       │       └── main.yml
+│       ├── vault.yml         # 秘密情報（ansible-vault で暗号化、Git 管理外。prepare_sd.yml だけが読み込む）
+│       ├── vault.yml.example
 │       └── host_vars/        # ホスト固有の変数（1台 = 1ファイル）
 │           ├── rpi-01.yml
 │           └── rpi-02.yml
@@ -42,7 +42,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
 1. 初回のみ: 秘密情報を ansible-vault で作成する（項目は `vault.yml.example` を参照）。`vault.yml` は `.gitignore` 済みで、リポジトリには含めない
    ```sh
    openssl passwd -6   # ログインパスワードのハッシュを生成
-   ansible-vault create inventories/home/group_vars/raspberry_pi/vault.yml
+   ansible-vault create inventories/home/vault.yml
    ```
 2. Raspberry Pi Imager で OS イメージを書き込む（OS カスタマイズは使わない）
 3. Mac にマウントされた bootfs に対して実行する

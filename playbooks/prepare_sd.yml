@@ -7,5 +7,8 @@
   gather_facts: false
   vars:
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  # 秘密情報はこの Playbook だけで使う。group_vars に置くと全 Playbook の実行に vault のパスワードが必要になる
+  vars_files:
+    - "{{ inventory_dir }}/vault.yml"
   roles:
     - bootfs

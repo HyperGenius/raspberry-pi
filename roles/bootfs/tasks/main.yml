@@ -9,7 +9,7 @@
       - bootfs_wifi_password | length >= 8
     fail_msg: >-
       target は1台だけ指定し、パスワードハッシュ・SSH公開鍵・Wi-Fi SSID/パスワード（8文字以上）を設定すること
-      （inventories/home/group_vars/raspberry_pi/vault.yml.example を参照）
+      （inventories/home/vault.yml.example を参照）
     quiet: true
 
 - name: Check that bootfs_path is a Raspberry Pi boot partition
