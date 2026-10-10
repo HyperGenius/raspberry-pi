@@ -7,6 +7,8 @@ common_packages:
   - htop
 
 ansible_ssh_private_key_file: ~/.ssh/id_ed25519_rp4
+# ホスト鍵を IP ではなくホスト名で known_hosts に記録する（DHCP → 固定IP の切り替えや mDNS 名での接続でも同じ鍵で検証する）
+ansible_ssh_common_args: "-o HostKeyAlias={{ inventory_hostname }}"
 
 # bootfs（playbooks/prepare_sd.yml）で使う値。秘密情報は vault.yml で定義する。
 bootfs_ssh_authorized_keys:

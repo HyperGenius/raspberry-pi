@@ -52,6 +52,11 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
    ```
 4. SD カードを取り出して Pi を起動する。初回は DHCP なので mDNS 名で接続する
    ```sh
+   # ホスト鍵は IP ではなくホスト名（HostKeyAlias）で known_hosts に記録する。
+   # Ansible は確認プロンプトに答えられないので、初回だけ手で接続して登録する
+   ssh-keygen -R rpi-01   # SD カードを作り直した場合は古い鍵を消す
+   ssh -o HostKeyAlias=rpi-01 -i ~/.ssh/id_ed25519_rp4 genius@rpi-01.local true
+
    ansible-playbook playbooks/site.yml --limit rpi-01 -e ansible_host=rpi-01.local
    ```
 
