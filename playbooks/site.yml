@@ -1,6 +1,33 @@
 ---
+# inventory の ansible_host（固定IP）にまだ接続できない場合（初回の DHCP 起動直後など）は、
+# bootstrap_host（既定: <hostname>.local）で接続する。
+# -e ansible_host=... は static_ip role の接続先切り替えを上書きしてしまうため使わない
+- name: Resolve the address to connect to
+  hosts: raspberry_pi
+  gather_facts: false
+  tags: always
+  tasks:
+    - name: Check whether ansible_host accepts SSH
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 22
+        timeout: 5
+      delegate_to: localhost
+      register: ssh_reachable
+      failed_when: false
+      check_mode: false
+
+    - name: Fall back to bootstrap_host
+      ansible.builtin.set_fact:
+        ansible_host: "{{ bootstrap_host }}"
+      when: ssh_reachable.state is not defined
+
 - name: Provision Raspberry Pi
   hosts: raspberry_pi
   become: true
   roles:
-    - common
+    # ネットワークを変更する（実機専用。Molecule では --skip-tags hardware で除外する）
+    - role: static_ip
+      tags: [static_ip, network, hardware]
+    - role: common
+      tags: [common]

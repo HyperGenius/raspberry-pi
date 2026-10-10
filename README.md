@@ -55,17 +55,37 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
    # ターミナルのカレントディレクトリが /Volumes/bootfs だと取り出せない
    cd ~ && diskutil eject /Volumes/bootfs
    ```
-4. SD カードを取り出して Pi を起動する。初回は DHCP なので mDNS 名で接続する
+4. SD カードを取り出して Pi を起動する。初回は DHCP なので mDNS 名（`<hostname>.local`、hostname は host_vars の値）で接続する
    ```sh
    # ホスト鍵は IP ではなくホスト名（HostKeyAlias）で known_hosts に記録する。
    # Ansible は確認プロンプトに答えられないので、初回だけ手で接続して登録する
    ssh-keygen -R rpi-01   # SD カードを作り直した場合は古い鍵を消す
-   ssh -o HostKeyAlias=rpi-01 -i ~/.ssh/id_ed25519_rp4 genius@rpi-01.local true
+   ssh -o HostKeyAlias=rpi-01 -i ~/.ssh/id_ed25519_rp4 genius@raspberrypi.local true
 
-   ansible-playbook playbooks/site.yml --limit rpi-01 -e ansible_host=rpi-01.local
+   # ansible_host（固定IP）に接続できなければ、自動で bootstrap_host（<hostname>.local）に接続する。
+   # -e ansible_host=... は固定IP化後の接続先の切り替えを妨げるので使わない
+   ansible-playbook playbooks/site.yml --limit rpi-01
    ```
 
 cloud-init が動くのは初回起動の 1 回だけ（`instance-id` で判定）。起動後に bootfs を編集しても反映されないため、bootfs には SSH で接続できるまでに必要な最小限だけを入れ、それ以外は role で設定する。
+
+## 固定IP（roles/static_ip）
+
+`host_vars/<host>.yml` の `static_ip_interfaces` に書いたインターフェースを固定IPにする。`hosts.yml` の `ansible_host` は、接続に使うインターフェース（`static_ip_connect_interface`、既定は wlan0）の固定IPにしておく。
+
+```yaml
+static_ip_interfaces:
+  - ifname: wlan0
+    address: 192.168.10.55/24
+    gateway: 192.168.10.1
+    dns: [192.168.10.1]
+```
+
+- cloud-init（netplan）が作った接続プロファイルをそのまま変更する。変更は NetworkManager が `/etc/netplan/90-NM-<UUID>.yaml` に書き戻す
+- 変更前に NetworkManager の checkpoint を作り、新しいアドレスへの再接続とゲートウェイへの ping が確認できたら確定する。確認できなければ元に戻す（接続が切れた場合は `static_ip_rollback_timeout` 秒後に NetworkManager が自動で戻す）
+- `/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg` を置き、cloud-init がネットワーク設定を作り直さないようにする
+- 実機専用のため `hardware` タグを付けている（Molecule では `--skip-tags hardware` で除外する）。単独で実行する場合は `--tags static_ip`
+- 開発中はモニタとキーボードをつなぎ、ロールバックに失敗した場合に備える
 
 ## Raspberry Pi を追加する
 

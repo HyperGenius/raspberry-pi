@@ -1,0 +1,185 @@
+---
+# cloud-init（netplan）由来のプロファイルを特定し、そのプロファイルを変更する（新しいプロファイルは作らない）
+- name: Find the connection profile active on {{ static_ip_if.ifname }}
+  ansible.builtin.command: nmcli -g GENERAL.CONNECTION device show {{ static_ip_if.ifname }}
+  register: static_ip_conn
+  changed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Fail if no profile is active on {{ static_ip_if.ifname }}
+  ansible.builtin.assert:
+    that: static_ip_conn.stdout | length > 0
+    fail_msg: "{{ static_ip_if.ifname }} で有効な接続プロファイルがない"
+    quiet: true
+
+- name: Read the profile details
+  ansible.builtin.command:
+    argv: [nmcli, -g, "connection.uuid,connection.type", connection, show, id, "{{ static_ip_conn.stdout }}"]
+  register: static_ip_profile
+  changed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Read the SSID of the Wi-Fi profile
+  ansible.builtin.command:
+    argv: [nmcli, -g, 802-11-wireless.ssid, connection, show, uuid, "{{ static_ip_profile.stdout_lines[0] }}"]
+  register: static_ip_ssid
+  changed_when: false
+  check_mode: false  # 読み取りのみ
+  when: static_ip_profile.stdout_lines[1] == '802-11-wireless'
+
+- name: List connection profiles before the change
+  ansible.builtin.command: nmcli -g UUID connection show
+  register: static_ip_uuids_before
+  changed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Check the netplan file that stores the profile
+  ansible.builtin.stat:
+    path: /etc/netplan/90-NM-{{ static_ip_profile.stdout_lines[0] }}.yaml
+  register: static_ip_netplan_file
+
+- name: Show where the profile is stored
+  ansible.builtin.debug:
+    msg: >-
+      {{ static_ip_if.ifname }}: {{ static_ip_conn.stdout }} ({{ static_ip_profile.stdout_lines[0] }})
+      / netplan: {{ static_ip_netplan_file.stat.path if static_ip_netplan_file.stat.exists else 'なし' }}
+
+- name: Set facts for {{ static_ip_if.ifname }}
+  ansible.builtin.set_fact:
+    static_ip_uuid: "{{ static_ip_profile.stdout_lines[0] }}"
+    static_ip_nmcli_type: "{{ {'802-11-wireless': 'wifi', '802-3-ethernet': 'ethernet'}[static_ip_profile.stdout_lines[1]] }}"
+    static_ip_new_host: "{{ static_ip_if.address.split('/') | first }}"
+    static_ip_previous_host: "{{ ansible_host }}"
+    static_ip_checkpoint: ""
+
+- name: Check whether {{ static_ip_if.ifname }} needs to change
+  community.general.nmcli: &static_ip_nmcli
+    conn_name: "{{ static_ip_conn.stdout }}"
+    type: "{{ static_ip_nmcli_type }}"
+    # ifname は指定しない。netplan 由来のプロファイルは connection.interface-name を持たず、
+    # 指定すると netplan に保持されないため毎回差分になる（既存プロファイルの変更なので不要）
+    ssid: "{{ static_ip_ssid.stdout | default(omit) }}"
+    method4: manual
+    ip4: ["{{ static_ip_if.address }}"]
+    gw4: "{{ static_ip_if.gateway }}"
+    dns4: "{{ static_ip_if.dns }}"
+    state: present
+  check_mode: true
+  register: static_ip_probe
+
+- name: Apply the static address with automatic rollback
+  when: static_ip_probe is changed and not ansible_check_mode
+  block:
+    - name: Get the NetworkManager device path of {{ static_ip_if.ifname }}
+      ansible.builtin.command: >-
+        busctl call org.freedesktop.NetworkManager /org/freedesktop/NetworkManager
+        org.freedesktop.NetworkManager GetDeviceByIpIface s {{ static_ip_if.ifname }}
+      register: static_ip_device
+      changed_when: false
+
+    # 確定（CheckpointDestroy）されないまま static_ip_rollback_timeout が過ぎると、NetworkManager が元に戻す
+    - name: Create a NetworkManager checkpoint
+      ansible.builtin.command: >-
+        busctl call org.freedesktop.NetworkManager /org/freedesktop/NetworkManager
+        org.freedesktop.NetworkManager CheckpointCreate aouu
+        1 {{ static_ip_device.stdout | regex_search('"(.+)"', '\1') | first }} {{ static_ip_rollback_timeout }} 1
+      register: static_ip_checkpoint_out
+      changed_when: true
+
+    - name: Remember the checkpoint path
+      ansible.builtin.set_fact:
+        static_ip_checkpoint: "{{ static_ip_checkpoint_out.stdout | regex_search('\"(.+)\"', '\\1') | first }}"
+
+    # プロファイルの内容だけを変更する（この時点では接続は切れない）
+    - name: Set the static address on the profile
+      community.general.nmcli: *static_ip_nmcli
+
+    # 接続が切れても Playbook が失敗しないよう、非同期で再接続させる
+    - name: Reactivate the profile in the background
+      ansible.builtin.shell: sleep 2 && nmcli connection up uuid {{ static_ip_uuid }}
+      async: 60
+      poll: 0
+      changed_when: true
+
+    - name: Switch ansible_host to the new address
+      ansible.builtin.set_fact:
+        ansible_host: "{{ static_ip_new_host }}"
+      when: static_ip_if.ifname == static_ip_connect_interface
+
+    # SSH の接続キャッシュ（ControlPath）は接続先アドレスごとなので、切り替え後は新しい接続になる
+    - name: Wait for the host to come back
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: "{{ static_ip_confirm_timeout }}"
+
+    - name: Check that {{ static_ip_if.ifname }} has the new address
+      ansible.builtin.command: ip -4 -o addr show dev {{ static_ip_if.ifname }}
+      register: static_ip_addr
+      changed_when: false
+      failed_when: static_ip_if.address not in static_ip_addr.stdout
+
+    - name: Check that the gateway is reachable
+      ansible.builtin.command: ping -c 3 -W 2 -I {{ static_ip_if.ifname }} {{ static_ip_if.gateway }}
+      changed_when: false
+      when: static_ip_check_gateway
+
+    - name: Confirm the change (destroy the checkpoint)
+      ansible.builtin.command: >-
+        busctl call org.freedesktop.NetworkManager /org/freedesktop/NetworkManager
+        org.freedesktop.NetworkManager CheckpointDestroy o {{ static_ip_checkpoint }}
+      changed_when: true
+
+    - name: List connection profiles after the change
+      ansible.builtin.command: nmcli -g UUID connection show
+      register: static_ip_uuids_after
+      changed_when: false
+
+    - name: Check that no duplicate profile was created
+      ansible.builtin.assert:
+        that: static_ip_uuids_after.stdout_lines | sort == static_ip_uuids_before.stdout_lines | sort
+        fail_msg: 接続プロファイルが増減している（重複作成の可能性）
+        quiet: true
+
+  rescue:
+    - name: Switch ansible_host back to the previous address
+      ansible.builtin.set_fact:
+        ansible_host: "{{ static_ip_previous_host }}"
+
+    - name: Reset the SSH connection
+      ansible.builtin.meta: reset_connection
+
+    # 接続できない場合は、NetworkManager が static_ip_rollback_timeout 経過後に元に戻すのを待つ
+    - name: Wait for the host on the previous address
+      ansible.builtin.wait_for_connection:
+        timeout: "{{ static_ip_rollback_timeout + 60 }}"
+
+    # 接続が切れずに失敗した場合（ゲートウェイ不達など）は、タイムアウトを待たずにすぐ戻す。
+    # 自動で戻った後なら checkpoint は消えているのでエラーになるが無視する。戻す処理で接続が切れることもある
+    - name: Roll back now if the checkpoint is still pending
+      ansible.builtin.command:
+        argv:
+          - busctl
+          - call
+          - org.freedesktop.NetworkManager
+          - /org/freedesktop/NetworkManager
+          - org.freedesktop.NetworkManager
+          - CheckpointRollback
+          - o
+          - "{{ static_ip_checkpoint }}"
+      register: static_ip_rollback
+      changed_when: static_ip_rollback.rc | default(1) == 0
+      failed_when: false
+      ignore_unreachable: true
+      when: static_ip_checkpoint | length > 0
+
+    - name: Reset the SSH connection
+      ansible.builtin.meta: reset_connection
+
+    - name: Wait for the host after the rollback
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: "{{ static_ip_rollback_timeout + 60 }}"
+
+    - name: Fail after rolling back
+      ansible.builtin.fail:
+        msg: "{{ static_ip_if.ifname }} を {{ static_ip_if.address }}（GW {{ static_ip_if.gateway }}）に変更したが確認できなかったため、元の設定に戻した。失敗したタスク: {{ ansible_failed_task.name | default('不明') }}"
