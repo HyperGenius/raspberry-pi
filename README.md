@@ -15,7 +15,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
 │       │   ├── all.yml
 │       │   └── raspberry_pi/
 │       │       ├── main.yml
-│       │       ├── vault.yml     # 秘密情報（ansible-vault で暗号化）
+│       │       ├── vault.yml     # 秘密情報（ansible-vault で暗号化、Git 管理外）
 │       │       └── vault.yml.example
 │       └── host_vars/        # ホスト固有の変数（1台 = 1ファイル）
 │           ├── rpi-01.yml
@@ -39,7 +39,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
 | `network-config` | inventory から生成（wlan0 / eth0 とも DHCP） |
 | `meta-data` | inventory から生成（`instance-id`） |
 
-1. 初回のみ: 秘密情報を ansible-vault で作成する（項目は `vault.yml.example` を参照）
+1. 初回のみ: 秘密情報を ansible-vault で作成する（項目は `vault.yml.example` を参照）。`vault.yml` は `.gitignore` 済みで、リポジトリには含めない
    ```sh
    openssl passwd -6   # ログインパスワードのハッシュを生成
    ansible-vault create inventories/home/group_vars/raspberry_pi/vault.yml
