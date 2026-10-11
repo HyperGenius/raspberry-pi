@@ -1,0 +1,6 @@
+---
+# journald の設定を反映する（/run/log/journal のログは消えない）
+- name: Restart systemd-journald
+  ansible.builtin.systemd_service:
+    name: systemd-journald
+    state: restarted

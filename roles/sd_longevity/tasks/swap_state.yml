@@ -1,0 +1,31 @@
+---
+# swap が zram だけになっているか（SD 上の swap ファイルを swap にも zram の writeback 先にも使っていないか）を確認する
+- name: List active swap devices
+  ansible.builtin.command: swapon --show=NAME --noheadings --raw
+  register: sd_longevity_swaps
+  changed_when: false
+  check_mode: false  # 読み取りのみ
+
+# zram+file では zram の writeback 先（backing_dev）が SD 上の swap ファイル（loop デバイス）になる
+- name: Read the writeback device of zram
+  ansible.builtin.command: cat /sys/block/{{ item | basename }}/backing_dev
+  loop: "{{ sd_longevity_swaps.stdout_lines | select('match', '^/dev/zram') | list }}"
+  register: sd_longevity_backing_devs
+  changed_when: false
+  failed_when: false  # writeback 非対応のカーネルにはファイルがない（writeback 先もない）
+  check_mode: false  # 読み取りのみ
+
+- name: Check whether {{ sd_longevity_swap_file }} exists
+  ansible.builtin.stat:
+    path: "{{ sd_longevity_swap_file }}"
+  register: sd_longevity_swap_file_stat
+
+- name: Set whether swap is zram only
+  ansible.builtin.set_fact:
+    sd_longevity_swap_ok: >-
+      {{
+        sd_longevity_swaps.stdout_lines | length > 0
+        and sd_longevity_swaps.stdout_lines | reject('match', '^/dev/zram') | list | length == 0
+        and sd_longevity_backing_devs.results | selectattr('rc', 'eq', 0) | map(attribute='stdout') | reject('eq', 'none') | list | length == 0
+        and not sd_longevity_swap_file_stat.stat.exists
+      }}

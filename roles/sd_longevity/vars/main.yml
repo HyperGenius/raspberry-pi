@@ -1,0 +1,7 @@
+---
+# OS 同梱の設定より後に読まれるよう、大きい番号の drop-in にする
+sd_longevity_swap_dropin: /etc/rpi/swap.conf.d/90-sd-longevity.conf
+sd_longevity_journald_dropin: /etc/systemd/journald.conf.d/90-sd-longevity.conf
+
+# atime の扱いを決めるマウントオプション（root にはこのうち noatime だけを付ける）
+sd_longevity_atime_opts: [atime, noatime, relatime, norelatime, strictatime, nostrictatime]

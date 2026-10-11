@@ -27,6 +27,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
     ├── bootfs/               # bootfs の user-data / network-config / meta-data / cmdline.txt
     ├── static_ip/            # 固定IP
     ├── sd_partition/         # SD カードのパーティション構成（root の拡張と Docker 用領域）
+    ├── sd_longevity/         # SD カードの延命（swap を zram のみに、journald の揮発化、root の noatime）
     ├── usb_storage/          # 既存の USB ストレージの自動マウント
     ├── docker/               # Docker（データは SD カードの p3、ログのローテーション）
     └── common/               # 全台共通の初期設定
@@ -115,6 +116,35 @@ static_ip_interfaces:
 ```sh
 ansible-playbook playbooks/site.yml --limit rpi-01 --tags sd_partition --check   # 予定を確認
 ansible-playbook playbooks/site.yml --limit rpi-01 --tags sd_partition
+```
+
+## SD カードの延命（roles/sd_longevity）
+
+SD カードへの書き込みを減らす。実行するタイミングは任意。
+
+| 対象 | 設定 | ファイル |
+|---|---|---|
+| swap | zram（RAM 上）だけにする。SD 上の swap ファイル（`/var/swap`）は使わない | `/etc/rpi/swap.conf.d/90-sd-longevity.conf`（`Mechanism=zram`） |
+| journald | `Storage=volatile`（`/run/log/journal` にだけ書く）、`RuntimeMaxUse` で上限を決める | `/etc/systemd/journald.conf.d/90-sd-longevity.conf` |
+| root | マウントオプションに `noatime` を付ける | `/etc/fstab` |
+
+| 変数 | 既定 | 内容 |
+|---|---|---|
+| `sd_longevity_journald_runtime_max_use` | `50M` | journald のログ（RAM 上）の上限。超えると古いものから消える |
+| `sd_longevity_swap_file` | `/var/swap` | rpi-swap の swap ファイル（`swap.conf` の `File::Path` と同じにする） |
+
+- Trixie の swap は rpi-swap（systemd の generator）が管理する。既定の `Mechanism=auto` は zram+file で、**SD 上の `/var/swap` を zram の writeback 先（使われていないページの書き出し先）に使う**。`Mechanism=zram` にすると、rpi-swap が起動時に `/var/swap` を削除する
+- 古い swap ファイル（`dphys-swapfile`）が残っていれば削除する
+- swap の設定は起動時に反映されるため、swap が zram だけになっていなければ 1 回だけ再起動する
+- 実行前に、rpi-swap 以外の swap（fstab の swap エントリなど）がないことを確認する（あれば何も変更せずに失敗する）
+- journald は Raspberry Pi OS 同梱の設定（`/usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf`）でも揮発化されているが、上限を変えるため role でも置く。変更したら journald を再起動する（ログは消えない。OS を再起動すると消える）
+- root の `noatime` は fstab に書き、現在のマウントにも remount で反映する（`relatime` などの atime 系オプションは外す）
+- 最後に、有効な swap が zram だけで writeback 先がないこと、journald が `/var/log/journal` のファイルを開いていないこと、`/` が `noatime` でマウントされていることを確認する
+- 再起動を伴うため実機専用（`hardware` タグ）。単独で実行する場合は `--tags sd_longevity`
+
+```sh
+ansible-playbook playbooks/site.yml --limit rpi-01 --tags sd_longevity --check   # 予定を確認
+ansible-playbook playbooks/site.yml --limit rpi-01 --tags sd_longevity
 ```
 
 ## USB ストレージ（roles/usb_storage）

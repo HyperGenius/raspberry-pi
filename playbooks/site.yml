@@ -32,6 +32,9 @@
     # SD カードのパーティションを変更する（実機専用。Docker の導入より前に実行する）
     - role: sd_partition
       tags: [sd_partition, storage, hardware]
+    # SD カードへの書き込みを減らす（swap を zram のみに、journald を揮発化、root に noatime）。swap を変えたら再起動する（実機専用）
+    - role: sd_longevity
+      tags: [sd_longevity, storage, hardware]
     # 既存の USB ストレージを UUID でマウントする（mkfs・chown はしない）
     - role: usb_storage
       tags: [usb_storage, storage]
