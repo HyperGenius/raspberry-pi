@@ -32,6 +32,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
     ├── docker/               # Docker（データは SD カードの p3、ログのローテーション）
     ├── sftpgo/               # SFTPGo で USB のディレクトリを LAN に公開する（REST API / WebDAV / Web クライアント）
     ├── epgstation/           # Mirakurun + EPGStation でテレビ番組を録画する（PX-S1UD、ハードウェアエンコード）
+    ├── plex/                 # Plex Media Server で USB のディレクトリを LAN に配信する
     └── common/               # 全台共通の初期設定
 ```
 
@@ -385,6 +386,71 @@ curl -X PUT "http://192.168.10.55:40772/api/config/channels/scan?type=GR&setDisa
 - 録画データの容量を監視する（`/mnt/data` の空き容量）
 - チューナーやカードリーダーの消費電力が大きい場合は、セルフパワーの USB ハブを使う
 - DB のパスワードは、DB の初期化時（volume が空のとき）にだけ使われる。後から変える場合は、MariaDB のユーザーのパスワードも手作業で変える
+
+## メディアサーバー（roles/plex）
+
+[Plex Media Server](https://www.plex.tv/) の公式イメージ（[plexinc/pms-docker](https://github.com/plexinc/pms-docker)）を Docker で動かし、USB のディレクトリ（既定 `/mnt/data/encoded`）をライブラリとして LAN に配信する。`plex` グループのホスト（`hosts.yml`）だけに適用する。**LAN の中だけで使う**（リモートアクセス・Relay は無効にする）。
+
+| 構成 | 内容 |
+|---|---|
+| `/opt/plex/compose.yml` | docker compose の定義（イメージのバージョンは `plex_image` で固定。`network_mode: host`） |
+| `/etc/systemd/system/plex.service` | `docker compose up` / `down` を行う。`RequiresMountsFor` で USB のマウントを待つ |
+| `plex_data_dir`/`config`（既定 `/mnt/data/plex/config`） | DB・メタデータ・サムネイル・`Preferences.xml`（コンテナの `/config`） |
+| `plex_data_dir`/`transcode`（既定 `/mnt/data/plex/transcode`） | トランスコードの一時ファイル（コンテナの `/transcode`） |
+| `plex_media_dirs` の `source` | ライブラリ（コンテナの `/data/<name>` に読み取り専用でマウントする） |
+
+| 変数 | 既定 | 内容 |
+|---|---|---|
+| `plex_image` | `plexinc/pms-docker:1.43.4.10903-e5521bd8c` | イメージ（バージョンを固定する） |
+| `plex_data_dir` | `/mnt/data/plex` | Plex のデータ（USB の ext4 上） |
+| `plex_media_dirs` | `[{name: encoded, source: /mnt/data/encoded}]` | ライブラリにするディレクトリ（USB の ext4 上） |
+| `plex_uid` / `plex_gid` | `1000` / `1000` | Plex の UID / GID（`plex_data_dir` の所有者） |
+| `plex_cpu_shares` | `512` | CPU の配分の重み（Docker の既定は `1024`）。cgroup v2 の `cpu.weight` では 59（既定は 100） |
+| `plex_preferences` | 下記 | サーバーの設定（Plex の API で設定する） |
+
+`plex_preferences` の既定（画面で変えても次の実行で戻る。ここにない設定は画面で変えてよい）:
+
+| 設定 | 値 | 内容 |
+|---|---|---|
+| `PublishServerOnPlexOnlineKey` | `false` | リモートアクセス（UPnP でルーターのポートを開ける）を無効にする |
+| `RelayEnabled` | `false` | Relay（plex.tv 経由の中継。ポートを開けなくても外から使える）を無効にする |
+| `DlnaEnabled` | `false` | DLNA（認証なしでライブラリを LAN に公開する）を無効にする |
+| `FSEventLibraryUpdatesEnabled` | `true` | ファイルが追加されたら自動でスキャンする |
+| `GenerateBIFBehavior` / `GenerateChapterThumbBehavior` / `LoudnessAnalysisBehavior` | `never` | ビデオプレビューのサムネイル・チャプターのサムネイル・音量の解析をしない（Pi の CPU では重い） |
+
+- Pi では Plex のハードウェアトランスコードは使えない（Plex が Pi のエンコーダに対応していない）。ソフトウェアのトランスコードは 720p でも間に合わないことがあるので、**ダイレクト再生（とコンテナの変換だけのダイレクトストリーム）を前提にする**。ライブラリの動画（H.264 / AAC の mkv・mp4）はそのまま再生できる。クライアントの画質の設定は「オリジナル」にする（下げるとトランスコードになる）
+- 実行前に、`docker compose` が使えること、`plex_data_dir` の親とライブラリのディレクトリが USB の ext4（`/` 以外のマウント）上にあること、UID `plex_uid` がライブラリのディレクトリを読めることを確認する（満たさなければ何も変更せずに失敗する。chown はしない）
+- `network_mode: host` で動かす（LAN 内のクライアントからの自動検出（GDM、32410〜32414/udp）のため）。Web と API は 32400/tcp
+- `plex_preferences` は Plex の API（`/:/prefs`）で読み書きする（再起動しない）。`Preferences.xml` を直接書き換えないのは、Plex が既定値の設定をファイルから消して書き戻すため。サーバーを登録した後は、`Preferences.xml` のサーバーのトークン（`PlexOnlineToken`）で API を使う
+- EPGStation と同じ Pi で動かすため、CPU の重みを下げている（録画・エンコードと取り合ったときに譲る）。メモリの上限は設定しない（Pi の cgroup ではメモリのコントローラが無効）
+- `compose.yml` を変更すると `plex.service` を再起動してコンテナを作り直す（再生中のものは止まる）
+- 最後に、コンテナがホストのネットワークで起動していること、bind mount が `plex_data_dir` の下とライブラリだけで、ライブラリが読み取り専用であること、Plex のユーザーでライブラリを読めること、`plex_preferences` が反映されていることを確認する。サーバーが未登録なら `[要確認]` を表示する
+- コンテナのログに出る `Critical: libusb_init failed` は、USB のチューナー（Plex の DVR 機能）を探せないだけなので無視してよい
+- vault は使わない。単独で実行する場合は `--tags plex`
+
+```sh
+ansible-playbook playbooks/site.yml --limit rpi-01 --tags plex
+```
+
+初回だけ、サーバーを Plex のアカウントに登録する（未登録のサーバーは LAN の他の PC からは設定できないことがあるので、Pi 自身（127.0.0.1）として接続する）:
+
+```sh
+# Mac から SSH のポートフォワードで接続したまま、ブラウザで http://127.0.0.1:32400/web を開く
+ssh -o HostKeyAlias=rpi-01 -i ~/.ssh/id_ed25519_rp4 -L 32400:127.0.0.1:32400 genius@192.168.10.55
+```
+
+1. Plex のアカウントでサインインし、サーバーに名前を付ける
+2. ライブラリを追加する（種類は「その他のビデオ」か「テレビ番組」、フォルダはコンテナ内のパス `/data/encoded`）
+3. 登録したら、もう一度 Ansible を実行する（`[要確認]` が出ないこと、設定が戻っていないことを確認する）
+
+以降は LAN 内のクライアント（Plex のアプリ、ブラウザの `http://192.168.10.55:32400/web`）から、同じアカウントでサインインして使う。
+
+運用規約:
+
+- **リモートアクセス・Relay を有効にしない**（LAN の外に公開しない）。画面で有効にしても、次の Ansible の実行で無効に戻る
+- ライブラリは読み取り専用でマウントする。Plex から動画を削除・変更しない（「メディアの削除を許可」は使えない）。最適化（Optimize）・同期も Pi の CPU では使わない
+- ライブラリにするディレクトリは `/mnt/data` 配下の必要なものに限定する。NTFS（`/mnt/share`）は対象外とする
+- Plex のデータ（`/mnt/data/plex`）の容量を監視する（ライブラリが大きくなると数 GB になる）
 
 ## Raspberry Pi を追加する
 

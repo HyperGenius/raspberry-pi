@@ -74,3 +74,12 @@
     # docker・usb_storage の後に実行する。チューナー・カードリーダーの実機が必要（Molecule では --skip-tags hardware で除外する）
     - role: epgstation
       tags: [epgstation, hardware]
+
+# Plex Media Server で USB のディレクトリを LAN に配信する（plex グループのホストだけ）。vault は使わない
+- name: Serve media with Plex
+  hosts: plex
+  become: true
+  roles:
+    # docker・usb_storage の後に実行する（/mnt/data が USB の ext4 でなければ何もせずに失敗する）
+    - role: plex
+      tags: [plex]

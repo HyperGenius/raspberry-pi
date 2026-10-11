@@ -1,0 +1,12 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# compose.yml の変更を反映する（docker compose down → up でコンテナを作り直す。再生中のものは止まる）。
+# --check で初めて導入する場合は、ユニットがまだないので何もしない
+- name: Restart plex
+  ansible.builtin.systemd_service:
+    name: plex
+    state: restarted
+  when: not ansible_check_mode or plex_unit_stat.stat.exists

@@ -1,0 +1,32 @@
+---
+# compose.yml を置くディレクトリ（docker compose のプロジェクトディレクトリ）
+plex_dir: /opt/plex
+plex_container_name: plex
+
+# Plex のデータの内訳（plex_data_dir の下。コンテナの /<name> に bind mount する）
+plex_data_subdirs: [config, transcode]
+
+# Plex のサーバー設定（コンテナの /config の下）。サーバーのトークン（PlexOnlineToken）を読む
+plex_preferences_file: "{{ plex_data_dir }}/config/Library/Application Support/Plex Media Server/Preferences.xml"
+
+# Plex の API（network_mode: host なのでホストの 127.0.0.1 で受ける）
+plex_api_url: http://127.0.0.1:32400
+
+# plex_preferences のうち、Plex の API（/:/prefs）で読んだ設定（plex_prefs_current）と値が違うもの。
+# 参照するたびに計算する（変更後に読み直して空になることを確認する）。bool は 1 / 0 にそろえて比べる（API は true / false で返す）
+plex_prefs_pending: >-
+  {%- set pending = {} -%}
+  {%- for setting in plex_prefs_current if setting.id in plex_preferences -%}
+  {%-   if setting.type == 'bool' -%}
+  {%-     set want = plex_preferences[setting.id] | bool | ternary('1', '0') -%}
+  {%-     set have = setting.value | bool | ternary('1', '0') -%}
+  {%-   else -%}
+  {%-     set want = plex_preferences[setting.id] | string -%}
+  {%-     set have = setting.value | string -%}
+  {%-   endif -%}
+  {%-   if want != have -%}{%- set _ = pending.update({setting.id: want}) -%}{%- endif -%}
+  {%- endfor -%}
+  {{ pending }}
+
+# plex_preferences のうち、Plex にない設定（id の誤り）
+plex_prefs_unknown: "{{ plex_preferences.keys() | difference(plex_prefs_current | map(attribute='id')) }}"
