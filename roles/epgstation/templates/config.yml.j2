@@ -1,0 +1,100 @@
+# {{ ansible_managed }}
+# upstream（docker-mirakurun-epgstation）の config.yml.template をもとに、ffmpeg を Debian のパッケージに、
+# 映像のエンコードを h264_v4l2m2m（Pi 4 のハードウェアエンコーダ）に変えたもの。
+# libx264 / libvpx（ソフトウェアエンコード）の配信は Pi 4 では間に合わないため置かない
+port: 8888
+mirakurunPath: http://mirakurun:40772/
+
+dbtype: mysql
+mysql:
+    host: mariadb
+    port: 3306
+    user: epgstation
+    password: {{ epgstation_db_password | to_json }}
+    database: epgstation
+    charset: utf8mb4
+
+epgUpdateIntervalTime: 10
+
+conflictPriority: 1
+recPriority: 2
+
+recordedFormat: '%YEAR%年%MONTH%月%DAY%日%HOUR%時%MIN%分%SEC%秒-%TITLE%'
+recordedFileExtension: .m2ts
+recorded:
+{% for dir in epgstation_recorded_dirs %}
+    - name: {{ dir.name }}
+      path: '%ROOT%/{{ dir.name }}'
+{% endfor %}
+
+thumbnail: '%ROOT%/thumbnail'
+thumbnailSize: 480x270
+thumbnailPosition: 5
+
+dropLog: '%ROOT%/drop'
+
+ffmpeg: /usr/bin/ffmpeg
+ffprobe: /usr/bin/ffprobe
+
+encodeProcessNum: 4
+concurrentEncodeNum: 1
+encode:
+    - name: H.264
+      cmd: '%NODE% %ROOT%/config/enc.js'
+      suffix: .mp4
+      rate: 4.0
+
+urlscheme:
+    m2ts:
+        ios: vlc-x-callback://x-callback-url/stream?url=PROTOCOL%3A%2F%2FADDRESS
+        android: intent://ADDRESS#Intent;action=android.intent.action.VIEW;type=video/*;scheme=PROTOCOL;end
+    video:
+        ios: infuse://x-callback-url/play?url=PROTOCOL://ADDRESS
+        android: intent://ADDRESS#Intent;action=android.intent.action.VIEW;type=video/*;scheme=PROTOCOL;end
+    download:
+        ios: vlc-x-callback://x-callback-url/download?url=PROTOCOL%3A%2F%2FADDRESS&filename=FILENAME
+
+# HLS は ffmpeg-hls（キーフレームごとに SPS/PPS を付け直す wrapper）を通す。「--」の前が入力とエンコード、後ろが HLS の出力
+# 音声は主音声（0:a:0）だけにする。2 本目以降の音声は途中で途切れることがあり、すべて指定すると ffmpeg がそれを待ち続ける
+stream:
+    live:
+        ts:
+            m2ts:
+                - name: 720p
+                  cmd:
+                      '%FFMPEG% -re -dual_mono_mode main -i pipe:0 -sn -threads 0 -c:a aac -ar 48000 -b:a 192k -ac 2
+                      -c:v h264_v4l2m2m -vf yadif,scale=trunc(720*dar/2)*2:720,setsar=1 -b:v 3000k -y -f mpegts pipe:1'
+                - name: 無変換
+
+            hls:
+                - name: 720p
+                  cmd:
+                      '/usr/local/bin/ffmpeg-hls -re -dual_mono_mode main -i pipe:0 -sn -map 0:v:0 -map 0:a:0 -threads 0
+                      -ignore_unknown -max_muxing_queue_size 1024 -c:a aac -ar 48000 -b:a 192k -ac 2 -c:v h264_v4l2m2m
+                      -vf yadif,scale=trunc(720*dar/2)*2:720,setsar=1 -b:v 3000k -g 90 -- -f hls -hls_time 3 -hls_list_size 17
+                      -hls_allow_cache 1 -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags
+                      delete_segments %OUTPUT%'
+                - name: 480p
+                  cmd:
+                      '/usr/local/bin/ffmpeg-hls -re -dual_mono_mode main -i pipe:0 -sn -map 0:v:0 -map 0:a:0 -threads 0
+                      -ignore_unknown -max_muxing_queue_size 1024 -c:a aac -ar 48000 -b:a 128k -ac 2 -c:v h264_v4l2m2m
+                      -vf yadif,scale=trunc(480*dar/2)*2:480,setsar=1 -b:v 1500k -g 90 -- -f hls -hls_time 3 -hls_list_size 17
+                      -hls_allow_cache 1 -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags
+                      delete_segments %OUTPUT%'
+    recorded:
+        ts:
+            hls:
+                - name: 720p
+                  cmd:
+                      '/usr/local/bin/ffmpeg-hls -dual_mono_mode main -i pipe:0 -sn -map 0:v:0 -map 0:a:0 -threads 0
+                      -ignore_unknown -max_muxing_queue_size 1024 -c:a aac -ar 48000 -b:a 192k -ac 2 -c:v h264_v4l2m2m
+                      -vf yadif,scale=trunc(720*dar/2)*2:720,setsar=1 -b:v 3000k -g 90 -- -f hls -hls_time 3 -hls_list_size 0
+                      -hls_allow_cache 1 -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags
+                      delete_segments %OUTPUT%'
+                - name: 480p
+                  cmd:
+                      '/usr/local/bin/ffmpeg-hls -dual_mono_mode main -i pipe:0 -sn -map 0:v:0 -map 0:a:0 -threads 0
+                      -ignore_unknown -max_muxing_queue_size 1024 -c:a aac -ar 48000 -b:a 128k -ac 2 -c:v h264_v4l2m2m
+                      -vf yadif,scale=trunc(480*dar/2)*2:480,setsar=1 -b:v 1500k -g 90 -- -f hls -hls_time 3 -hls_list_size 0
+                      -hls_allow_cache 1 -hls_segment_filename %streamFileDir%/stream%streamNum%-%09d.ts -hls_flags
+                      delete_segments %OUTPUT%'

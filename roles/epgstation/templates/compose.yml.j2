@@ -1,0 +1,126 @@
+# {{ ansible_managed }}
+# epgstation.service（systemd）から起動する。USB のマウントを待つため、直接 docker compose up しない
+name: epgstation
+services:
+  mirakurun:
+    image: {{ epgstation_mirakurun_image }}
+    container_name: {{ epgstation_mirakurun_container_name }}
+    restart: unless-stopped
+    cap_add:
+      - SYS_ADMIN
+      - SYS_NICE
+    environment:
+      TZ: {{ timezone | default('Asia/Tokyo') }}
+    # カードリーダー（USB）とチューナー（DVB）は、devices ではなく /dev の bind mount と cgroup の許可で渡す。
+    # カードリーダーは挿し直してもそのまま見える（/dev/bus/usb は残る）。チューナーを挿し直した場合は
+    # /dev/dvb が作り直されるため、epgstation.service を再起動する
+    device_cgroup_rules:
+      - "c {{ epgstation_usb_major }}:* rmw"
+      - "c {{ epgstation_dvb_major }}:* rmw"
+{% if epgstation_ports | selectattr('service', 'eq', 'mirakurun') | list | length > 0 %}
+    ports:
+{% for port in epgstation_ports | selectattr('service', 'eq', 'mirakurun') %}
+      - "{{ port.host }}:{{ port.container }}"
+{% endfor %}
+{% endif %}
+    volumes:
+      - type: bind
+        source: /dev/bus/usb
+        target: /dev/bus/usb
+      - type: bind
+        source: /dev/dvb
+        target: /dev/dvb
+        bind:
+          create_host_path: false
+      # tuners.yml / channels.yml（Ansible が書く）、server.yml（Mirakurun が作る）。チャンネルスキャンで channels.yml が書き換わる
+      - type: bind
+        source: {{ epgstation_mirakurun_config_dir }}
+        target: /app-config
+      # USB がマウントされていないときに SD カード上にディレクトリを作らないよう、create_host_path: false にする
+      - type: bind
+        source: {{ epgstation_mirakurun_data_dir }}
+        target: /app-data
+        bind:
+          create_host_path: false
+      # 起動時にビルドする B25 デコーダ（arib-b25-stream-test）。作り直しのたびに npm から取得しないよう残す（Docker の volume = p3）
+      - mirakurun-opt:/opt
+    tmpfs:
+      - /tmp
+
+  mariadb:
+    image: {{ epgstation_mariadb_image }}
+    container_name: {{ epgstation_mariadb_container_name }}
+    restart: unless-stopped
+    environment:
+      TZ: {{ timezone | default('Asia/Tokyo') }}
+      MARIADB_DATABASE: epgstation
+      MARIADB_USER: epgstation
+      MARIADB_PASSWORD: {{ epgstation_db_password | to_json }}
+      # root は使わない（初期化時のログにだけ出る）
+      MARIADB_RANDOM_ROOT_PASSWORD: "1"
+    # バイナリログは既定で無効
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --performance-schema=false
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    volumes:
+      # DB（Docker の volume = SD カードの p3）
+      - db:/var/lib/mysql
+
+  epgstation:
+    image: {{ epgstation_image }}
+    container_name: {{ epgstation_container_name }}
+    user: "{{ epgstation_uid }}:{{ epgstation_gid }}"
+    # ハードウェアエンコーダ（/dev/video*）は video グループが読み書きできる
+    group_add:
+      - "{{ epgstation_video_gid }}"
+    restart: unless-stopped
+    environment:
+      TZ: {{ timezone | default('Asia/Tokyo') }}
+    depends_on:
+      mirakurun:
+        condition: service_started
+      mariadb:
+        condition: service_healthy
+    devices:
+{% for device in epgstation_video_devices %}
+      - {{ device }}:{{ device }}
+{% endfor %}
+{% if epgstation_ports | selectattr('service', 'eq', 'epgstation') | list | length > 0 %}
+    ports:
+{% for port in epgstation_ports | selectattr('service', 'eq', 'epgstation') %}
+      - "{{ port.host }}:{{ port.container }}"
+{% endfor %}
+{% endif %}
+    volumes:
+{% for name in ['config.yml', 'enc.js', 'operatorLogConfig.yml', 'epgUpdaterLogConfig.yml', 'serviceLogConfig.yml'] %}
+      - type: bind
+        source: {{ epgstation_config_dir }}/{{ name }}
+        target: /app/config/{{ name }}
+        read_only: true
+        bind:
+          create_host_path: false
+{% endfor %}
+{% for dir in epgstation_recorded_dirs %}
+      - type: bind
+        source: {{ dir.source }}
+        target: /app/{{ dir.name }}
+        bind:
+          create_host_path: false
+{% endfor %}
+{% for name in epgstation_data_subdirs %}
+      - type: bind
+        source: {{ epgstation_data_dir }}/{{ name }}
+        target: /app/{{ name }}
+        bind:
+          create_host_path: false
+{% endfor %}
+volumes:
+  mirakurun-opt:
+  db:

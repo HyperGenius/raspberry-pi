@@ -1,0 +1,12 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# compose.yml・設定ファイルの変更を反映する（docker compose down → up でコンテナを作り直す。録画中・配信中のものは止まる）。
+# --check で初めて導入する場合は、ユニットがまだないので何もしない
+- name: Restart epgstation
+  ansible.builtin.systemd_service:
+    name: epgstation
+    state: restarted
+  when: not ansible_check_mode or epgstation_unit_stat.stat.exists

@@ -1,0 +1,45 @@
+---
+# compose.yml などを置くディレクトリ（docker compose のプロジェクトディレクトリ）
+epgstation_dir: /opt/epgstation
+epgstation_mirakurun_config_dir: "{{ epgstation_dir }}/mirakurun"
+epgstation_config_dir: "{{ epgstation_dir }}/epgstation"
+epgstation_build_dir: "{{ epgstation_dir }}/build"
+
+epgstation_container_name: epgstation
+epgstation_mirakurun_container_name: mirakurun
+epgstation_mariadb_container_name: epgstation-db
+
+# EPGStation のイメージ（Pi 上でビルドする）。Dockerfile・wrapper が変わるとタグが変わり、ビルドし直す
+epgstation_image: >-
+  local/epgstation:{{ epgstation_base_image.split(':') | last }}-{{
+    ((lookup('ansible.builtin.template', 'Dockerfile.j2') ~ lookup('ansible.builtin.file', 'ffmpeg-hls')) | hash('sha1'))[:12]
+  }}
+
+# EPGStation のデータの内訳（epgstation_data_dir の下。コンテナの /app/<name> に bind mount する）
+epgstation_data_subdirs: [data, thumbnail, drop]
+
+# PX-S1UD のファームウェア（PLEX のドライバに含まれる）。カーネルの smsusb ドライバが読み込む
+epgstation_firmware_path: /lib/firmware/isdbt_rio.inp
+epgstation_firmware_sha256: 7527c193aa977763a49d9c440207080ab6cf1dc6997c9027bfbd3c7d3dc74469
+epgstation_firmware_zip_url: https://plex-net.co.jp/plex/px-s1ud/PX-S1UD_driver_Ver.1.0.1.zip
+epgstation_firmware_zip_sha256: 149fce6210a914a8e0b236d4bd254560acf09e8f1e1efb86bafaf4c1f630e916
+epgstation_firmware_zip_member: PX-S1UD_driver_Ver.1.0.1/x64/amd64/isdbt_rio.inp
+
+# デバイスの major 番号（コンテナに挿し直したデバイスを見せるため、cgroup で許可する）
+epgstation_usb_major: 189
+epgstation_dvb_major: 212
+
+# 公開するポート（ホスト側が 0 のものは除く）
+epgstation_ports: >-
+  {{
+    [{'host': epgstation_http_port | int, 'container': 8888, 'service': 'epgstation'},
+     {'host': epgstation_mirakurun_port | int, 'container': 40772, 'service': 'mirakurun'}]
+    | rejectattr('host', 'eq', 0) | list
+  }}
+
+# 録画ディレクトリ（EPGStation の recorded）。エンコード後の置き場所は別のディレクトリにできる
+epgstation_recorded_dirs: >-
+  {{
+    [{'name': 'recorded', 'source': epgstation_recorded_dir}]
+    + ([{'name': 'encoded', 'source': epgstation_encoded_dir}] if epgstation_encoded_dir | length > 0 else [])
+  }}
