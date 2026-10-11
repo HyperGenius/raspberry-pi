@@ -1,0 +1,57 @@
+---
+# イメージ（バージョンを固定する）
+#   Mirakurun:  https://hub.docker.com/r/chinachu/mirakurun/tags
+#   MariaDB:    https://hub.docker.com/_/mariadb/tags（10.11 は LTS）
+#   EPGStation: https://hub.docker.com/r/l3tnun/epgstation/tags（-debian のもの。ffmpeg を追加してビルドする）
+epgstation_mirakurun_image: chinachu/mirakurun:4.1.5
+epgstation_mariadb_image: mariadb:10.11.19
+epgstation_base_image: l3tnun/epgstation:v2.10.0-debian
+
+# 録画データの置き場所（USB の ext4 上）。既にあれば所有者は変更しない（chown しない）
+epgstation_recorded_dir: /mnt/data/recorded
+# エンコード後のファイルの置き場所。空なら録画データと同じディレクトリに置く。
+# EPGStation の「クリーンアップ」は、ここにある DB に登録されていないファイルを削除するため、
+# 他の用途のファイルがあるディレクトリ（sftpgo_share_dir など）は指定しない。専用のサブディレクトリにする
+epgstation_encoded_dir: ""
+# EPGStation のデータ（予約情報・HLS の一時ファイル・サムネイル・ドロップログ）
+epgstation_data_dir: /mnt/data/epgstation
+# Mirakurun のデータ（EPG・チャンネルのキャッシュ）
+epgstation_mirakurun_data_dir: /mnt/data/mirakurun
+
+# EPGStation のコンテナを動かす UID / GID（録画ファイルの所有者になる）。Pi のユーザーに合わせる
+epgstation_uid: 1000
+epgstation_gid: 1000
+
+# ホスト側のポート。0 で無効にする
+epgstation_http_port: 8888        # EPGStation（ブラウザ・API）
+epgstation_mirakurun_port: 40772  # Mirakurun（チャンネルスキャン、LAN 内の他のクライアント）
+
+# MariaDB の epgstation ユーザーのパスワード（vault に置く）。DB の初期化時（volume が空のとき）にだけ使われる
+epgstation_db_password: "{{ vault_epgstation_db_password }}"
+
+# チューナー（Mirakurun の tuners.yml）。PX-S1UD は地上デジタル専用・1 チューナーの DVB デバイス
+epgstation_tuners:
+  - name: PX-S1UD
+    types: [GR]
+    adapter: 0  # /dev/dvb/adapter0
+
+# チャンネル（Mirakurun の channels.yml）。空なら管理しない（チャンネルスキャンの結果をそのまま使う）。
+# スキャンの結果を固定する場合は host_vars に書く
+#   - name: ＮＨＫ総合
+#     type: GR
+#     channel: '27'
+epgstation_channels: []
+
+# B-CAS カードのカードリーダー（USB の CCID）がなければ失敗させる（カードがないと録画はスクランブルされたまま）
+epgstation_require_card_reader: true
+
+# ハードウェアエンコーダ（bcm2835-codec）のデバイス
+epgstation_video_devices:
+  - /dev/video10
+  - /dev/video11
+  - /dev/video12
+
+# エンコード（h264_v4l2m2m）の設定
+epgstation_encode_height: 720
+epgstation_encode_video_bitrate: 3000k
+epgstation_encode_audio_bitrate: 192k

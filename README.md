@@ -15,7 +15,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
 │       │   ├── all.yml
 │       │   └── raspberry_pi/
 │       │       └── main.yml
-│       ├── vault.yml         # 秘密情報（ansible-vault で暗号化、Git 管理外。prepare_sd.yml と site.yml の sftpgo だけが読み込む）
+│       ├── vault.yml         # 秘密情報（ansible-vault で暗号化、Git 管理外。prepare_sd.yml と site.yml の sftpgo・epgstation だけが読み込む）
 │       ├── vault.yml.example
 │       └── host_vars/        # ホスト固有の変数（1台 = 1ファイル）
 │           ├── rpi-01.yml
@@ -31,6 +31,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
     ├── usb_storage/          # 既存の USB ストレージの自動マウント
     ├── docker/               # Docker（データは SD カードの p3、ログのローテーション）
     ├── sftpgo/               # SFTPGo で USB のディレクトリを LAN に公開する（REST API / WebDAV / Web クライアント）
+    ├── epgstation/           # Mirakurun + EPGStation でテレビ番組を録画する（PX-S1UD、ハードウェアエンコード）
     └── common/               # 全台共通の初期設定
 ```
 
@@ -296,6 +297,95 @@ curl -H "Authorization: Bearer $T" --data-binary @file.mp4 "$B/api/v2/user/files
 - 削除・上書きの権限（`delete` / `overwrite` / `rename`）は必要なユーザーにだけ与える。API からの削除は取り消せない
 - Pi 上の処理（エンコードなど）と API が同じディレクトリに同時に書き込む場合は、書き込み先を分ける（例: API は `uploads/` に書く）
 
+## 録画サーバー（roles/epgstation）
+
+[docker-mirakurun-epgstation](https://github.com/l3tnun/docker-mirakurun-epgstation) をもとに、[Mirakurun](https://github.com/Chinachu/Mirakurun)（チューナーの管理）+ MariaDB + [EPGStation](https://github.com/l3tnun/EPGStation)（予約・録画・エンコード・視聴）を Docker で動かす。`epgstation` グループのホスト（`hosts.yml`）だけに適用する。upstream の `setup.sh` は使わず、compose.yml と設定ファイルを role のテンプレートから生成する。
+
+| 機器 | 内容 |
+|---|---|
+| チューナー | PX-S1UD V2.0（地上デジタル専用・1 チューナー）。カーネル標準の DVB ドライバ（`smsusb`）で `/dev/dvb/adapter0` になる |
+| カードリーダー | USB の CCID（GemPC Twin など）。B-CAS カードはコンテナ内の pcscd で読む |
+| エンコーダ | Pi 4 のハードウェアエンコーダ（`h264_v4l2m2m`、`/dev/video10`〜`12`） |
+
+| 構成 | 内容 |
+|---|---|
+| `/opt/epgstation/compose.yml` | docker compose の定義（DB のパスワードを含むため `root` の `0600`） |
+| `/opt/epgstation/build/` | EPGStation のイメージの Dockerfile と `ffmpeg-hls`（Pi 上でビルドする） |
+| `/opt/epgstation/mirakurun/` | Mirakurun の `tuners.yml` / `channels.yml` / `server.yml` |
+| `/opt/epgstation/epgstation/` | EPGStation の `config.yml`（`root:<gid>` の `0640`）/ `enc.js` / ログの設定 |
+| `/etc/systemd/system/epgstation.service` | `docker compose up` / `down` を行う。`RequiresMountsFor` で USB のマウントを待つ |
+| `epgstation_recorded_dir`（既定 `/mnt/data/recorded`） | 録画データ（EPGStation の `/app/recorded`） |
+| `epgstation_data_dir`（既定 `/mnt/data/epgstation`） | 予約情報・HLS の一時ファイル（`data`）、サムネイル（`thumbnail`）、ドロップログ（`drop`） |
+| `epgstation_mirakurun_data_dir`（既定 `/mnt/data/mirakurun`） | Mirakurun の EPG・チャンネルのキャッシュ |
+| Docker の volume `epgstation_db` | MariaDB のデータ（p3） |
+| Docker の volume `epgstation_mirakurun-opt` | Mirakurun が初回の起動時にビルドする B25 デコーダ（`arib-b25-stream-test`） |
+| `/lib/firmware/isdbt_rio.inp` | PX-S1UD のファームウェア |
+
+| 変数 | 既定 | 内容 |
+|---|---|---|
+| `epgstation_mirakurun_image` | `chinachu/mirakurun:4.1.5` | Mirakurun のイメージ（バージョンを固定する） |
+| `epgstation_mariadb_image` | `mariadb:10.11.19` | MariaDB のイメージ |
+| `epgstation_base_image` | `l3tnun/epgstation:v2.10.0-debian` | EPGStation のイメージ（ffmpeg を追加してビルドする） |
+| `epgstation_recorded_dir` | `/mnt/data/recorded` | 録画データ（USB の ext4 上） |
+| `epgstation_encoded_dir` | `""` | エンコード後のファイルの置き場所。空なら録画データと同じ |
+| `epgstation_data_dir` | `/mnt/data/epgstation` | EPGStation のデータ |
+| `epgstation_mirakurun_data_dir` | `/mnt/data/mirakurun` | Mirakurun のデータ |
+| `epgstation_uid` / `epgstation_gid` | `1000` / `1000` | EPGStation の UID / GID（録画ファイルの所有者） |
+| `epgstation_http_port` | `8888` | EPGStation（`0` で無効） |
+| `epgstation_mirakurun_port` | `40772` | Mirakurun（`0` で無効） |
+| `epgstation_db_password` | `vault_epgstation_db_password` | MariaDB の epgstation ユーザーのパスワード（8 文字以上） |
+| `epgstation_tuners` | PX-S1UD（adapter 0） | チューナーの一覧（`name` / `types` / `adapter`） |
+| `epgstation_channels` | `[]` | チャンネルの一覧。空ならチャンネルスキャンの結果をそのまま使う |
+| `epgstation_require_card_reader` | `true` | カードリーダーがなければ失敗させる |
+| `epgstation_encode_height` | `720` | エンコード後の高さ |
+| `epgstation_encode_video_bitrate` / `_audio_bitrate` | `3000k` / `192k` | エンコード後のビットレート |
+
+- 実行前に次を確認する（満たさなければ何も変更せずに失敗する）
+  - `docker compose` が使える
+  - チューナー（`/dev/dvb/adapter<N>/frontend0`）、ハードウェアエンコーダ（`/dev/video10`〜`12`）、カードリーダー（USB の interface class `0x0b`）がある
+  - 録画データ・データのディレクトリの親が USB の ext4（`/` 以外のマウント）上にある
+  - 録画データのディレクトリが既にある場合は、UID `epgstation_uid` が書き込める（chown はしない。書き込めなければ手作業で所有者を変更する）
+- ホストの pcscd は止めてマスクする。B-CAS カードはコンテナ内の pcscd で読む（ホストとコンテナでカードリーダーを取り合わないようにするため）。ホストの pcscd（Trixie の pcsc-lite 2.x）はコンテナの libpcsclite（Bookworm の 1.9.9）とプロトコルのバージョンが違うので、ホストの pcscd をコンテナと共有することもできない。そのため、ホストに `pcscd` / `libccid` / `pcsc-tools` などは入れない
+- PX-S1UD のファームウェアがなければ、PLEX のドライバ（zip）から取り出して `/lib/firmware` に置き、1 回だけ再起動して読み込ませる（zip とファームウェアはチェックサムで確認する）。`modprobe -r smsusb` でドライバを外すと、カーネルの警告が出た後にチューナーが USB のエラーで切断されることがあったため、読み込み直しは行わない
+- チューナーは `/dev/dvb` の bind mount でコンテナに渡す。チューナーを挿し直した場合や USB のエラーで再認識された場合は、`/dev/dvb` が作り直されてコンテナから見えなくなるので、`sudo systemctl restart epgstation` を実行する（カードリーダーは挿し直してもそのまま使える）
+- EPGStation のイメージには、Debian の ffmpeg（`h264_v4l2m2m` を含む）を追加してビルドする（upstream のように ffmpeg をソースからビルドすると、Pi では時間がかかるため）。Dockerfile か `ffmpeg-hls` が変わるとイメージのタグが変わり、ビルドし直す。古いイメージは `docker image prune` で消す
+- エンコード（`enc.js`）は `h264_v4l2m2m` で mp4（1280x720、正方形の画素）にする。MPEG-2 のデコードとインターレース解除は CPU で行う（実測で 0.8〜1 倍速。1 時間の番組に 1 時間強かかる）。字幕は mp4 に入れない
+- エンコード・配信の音声は主音声（`0:a:0`）だけにする。放送の 2 本目以降の音声は途中で途切れることがあり、すべて指定すると ffmpeg がその音声を待ち続けて終わらない（SIGTERM でも止まらない）。二か国語放送（デュアルモノ）は、主音声を左右に分けて 2 本にする
+- 配信は次の 2 つだけにする（libx264 / libvpx のソフトウェアエンコードは Pi 4 では間に合わない）
+  - ライブ: m2ts（720p、無変換）と HLS（720p、480p）
+  - 録画: HLS（720p、480p）
+- `h264_v4l2m2m` は SPS/PPS を最初の 1 回しか出力しないため、そのまま HLS に分割すると 2 つ目以降のセグメントを単独で再生できない（途中からの再生やライブ視聴ができない）。HLS の配信は `ffmpeg-hls` を通す。`ffmpeg-hls` はエンコード結果を mpegts で別の ffmpeg に渡し、`-bsf:v dump_extra` でキーフレームごとに SPS/PPS を付け直してから分割する
+- ログはファイルに書かず、標準出力（Docker の json-file、daemon.json でローテーション）に出す
+- 設定ファイル・compose.yml を変更すると `epgstation.service` を再起動する。**録画中・配信中のものは止まる**ので、録画のない時間に実行する
+- 最後に、コンテナが 3 つとも起動していること、Mirakurun のチューナーが使えること、コンテナ内で B-CAS カードを読めること、EPGStation の UID でハードウェアエンコーダを使えること、EPGStation の API が応答することを確認する
+- vault を読み込むため、実行には `--ask-vault-pass` が必要。チューナー・カードリーダーの実機が必要なため `hardware` タグを付けている。単独で実行する場合は `--tags epgstation`
+
+```sh
+ansible-vault edit inventories/home/vault.yml      # vault_epgstation_db_password を追加
+ansible-playbook playbooks/site.yml --limit rpi-01 --tags epgstation --ask-vault-pass
+```
+
+チャンネルスキャン（初回とチャンネルが変わったときだけ。地上波で数分〜十数分かかる）:
+
+```sh
+# Mirakurun が channels.yml を書き換え、そのまま使われる
+curl -X PUT "http://192.168.10.55:40772/api/config/channels/scan?type=GR&setDisabledOnAdd=false&refresh=true"
+```
+
+スキャンの結果を固定する場合は、`/opt/epgstation/mirakurun/channels.yml` の内容を `host_vars` の `epgstation_channels` に書く（以降は Ansible が channels.yml を書き、スキャンで書き換えても次の実行で元に戻る）。
+
+- ブラウザ: `http://192.168.10.55:8888/`（EPGStation）
+- Mirakurun: `http://192.168.10.55:40772/`
+
+運用規約:
+
+- **EPGStation の「クリーンアップ」（`POST /api/recorded/cleanup`）は、録画ディレクトリにある DB に登録されていないファイルをすべて削除する。** `epgstation_recorded_dir` に EPGStation の外で作ったファイル（導入前からある録画など）がある場合は実行しない。`epgstation_encoded_dir` は専用のディレクトリにし、他の用途のファイルがある場所（SFTPGo で公開している `/mnt/data/encoded` など）は指定しない（role でも `sftpgo_share_dir` は指定できないようにしている）
+- EPGStation には認証がないので、LAN の外に公開しない
+- チューナーは 1 つなので、同時に録画・視聴できるのは 1 番組だけ。予約が重なった場合は EPGStation の競合表示で確認する。BS/CS を録画する場合は、対応するチューナーを追加して `epgstation_tuners` に書く
+- 録画データの容量を監視する（`/mnt/data` の空き容量）
+- チューナーやカードリーダーの消費電力が大きい場合は、セルフパワーの USB ハブを使う
+- DB のパスワードは、DB の初期化時（volume が空のとき）にだけ使われる。後から変える場合は、MariaDB のユーザーのパスワードも手作業で変える
+
 ## Raspberry Pi を追加する
 
 1. `inventories/home/hosts.yml` にホストを追加
@@ -308,7 +398,7 @@ curl -H "Authorization: Bearer $T" --data-binary @file.mp4 "$B/api/v2/user/files
 ```sh
 ansible-galaxy collection install -r requirements.yml
 
-# 全台（sftpgo グループのホストがあるため vault のパスワードが必要）
+# 全台（sftpgo・epgstation グループのホストがあるため vault のパスワードが必要）
 ansible-playbook playbooks/site.yml --ask-vault-pass
 
 # 特定のホストだけ

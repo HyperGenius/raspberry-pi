@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+# ログはファイルに書かず、標準出力（Docker の json-file、daemon.json でローテーション）にだけ出す。
+# category を定義しないもの（system / access / stream / encode）は default に従う
+appenders:
+  stdout:
+    type: stdout
+categories:
+  default:
+    appenders:
+      - stdout
+    level: info

@@ -59,3 +59,18 @@
     # docker・usb_storage の後に実行する（/mnt/data が USB の ext4 でなければ何もせずに失敗する）
     - role: sftpgo
       tags: [sftpgo]
+
+# Mirakurun + EPGStation でテレビ番組を録画する（epgstation グループのホストだけ）。
+# DB のパスワードを vault から読み込むため --ask-vault-pass が必要
+- name: Record TV with Mirakurun and EPGStation
+  hosts: epgstation
+  become: true
+  pre_tasks:
+    - name: Load the secrets
+      ansible.builtin.include_vars:
+        file: "{{ inventory_dir }}/vault.yml"
+      tags: [epgstation, hardware]
+  roles:
+    # docker・usb_storage の後に実行する。チューナー・カードリーダーの実機が必要（Molecule では --skip-tags hardware で除外する）
+    - role: epgstation
+      tags: [epgstation, hardware]

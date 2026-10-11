@@ -1,0 +1,20 @@
+# {{ ansible_managed }}
+# Mirakurun + EPGStation（docker compose）。USB（nofail）がマウントされていなければ起動しない（SD カードに録画しない）
+[Unit]
+Description=Mirakurun + EPGStation (docker compose)
+Requires=docker.service
+After=docker.service
+RequiresMountsFor={{ ([epgstation_mirakurun_data_dir, epgstation_data_dir] + epgstation_recorded_dirs | map(attribute='source') | list) | join(' ') }}
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory={{ epgstation_dir }}
+# イメージは Ansible が取得・ビルドする（起動時にネットワークに依存しない）
+ExecStart=/usr/bin/docker compose up --detach --wait --pull never --remove-orphans
+ExecStop=/usr/bin/docker compose down
+# MariaDB の初回の初期化を待つ
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

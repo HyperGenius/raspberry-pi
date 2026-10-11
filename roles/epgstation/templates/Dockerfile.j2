@@ -1,0 +1,8 @@
+# {{ ansible_managed }}
+# EPGStation に ffmpeg（Debian のパッケージ。h264_v4l2m2m を含む）と HLS 配信用の wrapper を追加する。
+# upstream（docker-mirakurun-epgstation）のように ffmpeg をソースからビルドすると、Pi 上では時間がかかるため
+FROM {{ epgstation_base_image }}
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+COPY --chmod=755 ffmpeg-hls /usr/local/bin/ffmpeg-hls

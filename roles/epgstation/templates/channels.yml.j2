@@ -1,0 +1,3 @@
+# {{ ansible_managed }}
+# epgstation_channels から生成する。チャンネルスキャンで書き換えても、次の実行で元に戻る
+{{ epgstation_channels | to_nice_yaml(indent=2) }}

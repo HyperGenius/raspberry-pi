@@ -1,0 +1,25 @@
+#!/bin/bash
+# HLS 配信用の ffmpeg（EPGStation の stream の cmd から呼ぶ）
+#   ffmpeg-hls <入力とエンコードの引数...> -- <HLS の出力の引数...>
+#
+# h264_v4l2m2m（Pi 4 のハードウェアエンコーダ）は SPS/PPS を最初の 1 回しか出力しないため、
+# そのまま HLS に分割すると 2 つ目以降のセグメントを単独で再生できない（途中から再生・ライブ視聴ができない）。
+# エンコード結果を mpegts で別の ffmpeg に渡し、キーフレームごとに SPS/PPS を付け直してから分割する。
+#
+# exec で後段の ffmpeg がこのプロセスを引き継ぐ（EPGStation の SIGINT が直接届く）。
+# 前段は stdin（EPGStation からの入力）が閉じられるか、後段が終了すると終了する
+set -euo pipefail
+
+encode_args=()
+while (($#)); do
+    if [[ $1 == -- ]]; then
+        shift
+        break
+    fi
+    encode_args+=("$1")
+    shift
+done
+
+# 後段は stdin を読まない（-nostdin。読むと EPGStation からの入力を前段と取り合う）
+exec ffmpeg -hide_banner -nostdin -f mpegts -i <(exec ffmpeg -hide_banner "${encode_args[@]}" -f mpegts pipe:1) \
+    -map 0 -c copy -bsf:v dump_extra=freq=keyframe "$@"

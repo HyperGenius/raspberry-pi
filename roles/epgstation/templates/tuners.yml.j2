@@ -1,0 +1,10 @@
+# {{ ansible_managed }}
+# DVB デバイス（PX-S1UD など）は dvbv5-zap で選局し、dvr デバイスから読む。B25 は Mirakurun のコンテナ内でデコードする
+{% for tuner in epgstation_tuners %}
+- name: {{ tuner.name | to_json }}
+  types: {{ tuner.types | to_json }}
+  command: dvbv5-zap -a {{ tuner.adapter }} -c /app/config/dvbconf-for-isdb/conf/dvbv5_channels_isdbt.conf -r -P <channel>
+  dvbDevicePath: /dev/dvb/adapter{{ tuner.adapter }}/dvr0
+  decoder: arib-b25-stream-test
+  isDisabled: false
+{% endfor %}

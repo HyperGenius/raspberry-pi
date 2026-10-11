@@ -1,0 +1,557 @@
+---
+# 実行順序: 設定の検証 → 実行前チェック → ホストの pcscd の停止 → チューナーのファームウェア → ディレクトリ
+#          → イメージ（取得・ビルド）→ 設定ファイル・compose.yml・systemd ユニット →（handler で反映）→ 検証
+- name: Validate epgstation settings
+  ansible.builtin.assert:
+    that:
+      - epgstation_db_password | length >= 8
+      - epgstation_tuners | length > 0
+      - epgstation_tuners | map(attribute='adapter') | unique | length == epgstation_tuners | length
+      - epgstation_ports | length > 0
+      - epgstation_ports | map(attribute='host') | unique | length == epgstation_ports | length
+      - epgstation_ports | map(attribute='host') | reject('ge', 1) | list | length == 0
+      - epgstation_ports | map(attribute='host') | reject('le', 65535) | list | length == 0
+      - 22 not in epgstation_ports | map(attribute='host')
+      - epgstation_recorded_dirs | map(attribute='source') | reject('match', '^/.+[^/]$') | list | length == 0
+      - epgstation_recorded_dirs | map(attribute='source') | unique | length == epgstation_recorded_dirs | length
+      # EPGStation の「クリーンアップ」で、SFTPGo で公開しているファイルが削除されないようにする
+      - sftpgo_share_dir | default('/mnt/data/encoded') not in epgstation_recorded_dirs | map(attribute='source')
+      - epgstation_data_dir is match('^/.+[^/]$')
+      - epgstation_mirakurun_data_dir is match('^/.+[^/]$')
+    fail_msg: >-
+      epgstation_db_password は 8 文字以上（vault の vault_epgstation_db_password）にすること。
+      epgstation_tuners は 1 つ以上で adapter を重複させないこと。ポートは 1 つ以上を有効にし、重複させず、22（sshd）は使わないこと。
+      epgstation_recorded_dir・epgstation_encoded_dir・epgstation_data_dir・epgstation_mirakurun_data_dir は絶対パス（末尾の / なし）にし、
+      epgstation_encoded_dir は epgstation_recorded_dir と sftpgo_share_dir（/mnt/data/encoded）以外のディレクトリにすること
+    quiet: true
+
+# ---- 実行前チェック（何も変更する前に確認する）----
+- name: Check that docker compose is available
+  ansible.builtin.command: docker compose version
+  register: epgstation_compose_version
+  changed_when: false
+  failed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Fail unless docker compose is available
+  ansible.builtin.assert:
+    that: epgstation_compose_version.rc == 0
+    fail_msg: docker compose が使えない。先に docker role（--tags docker）を実行すること
+    quiet: true
+
+- name: Check the tuners
+  ansible.builtin.stat:
+    path: /dev/dvb/adapter{{ item.adapter }}/frontend0
+  loop: "{{ epgstation_tuners }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: epgstation_tuner_stat
+
+- name: Fail unless the tuners are connected
+  ansible.builtin.assert:
+    that: item.stat.ischr | default(false)
+    fail_msg: "{{ item.item.name }}（/dev/dvb/adapter{{ item.item.adapter }}）がない。チューナーが接続されているか確認すること（lsusb、dmesg）"
+    quiet: true
+  loop: "{{ epgstation_tuner_stat.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Check the hardware encoder devices
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ epgstation_video_devices }}"
+  register: epgstation_video_stat
+
+- name: Fail unless the hardware encoder devices exist
+  ansible.builtin.assert:
+    that: item.stat.ischr | default(false)
+    fail_msg: "{{ item.item }} がない（bcm2835-codec）。Pi 4 以外ではハードウェアエンコーダを使えない"
+    quiet: true
+  loop: "{{ epgstation_video_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+# カードリーダーはホストでは使わない（コンテナ内の pcscd が使う）ので、USB の CCID（interface class 0x0b）があるかだけを見る
+- name: Find USB smart card readers
+  ansible.builtin.shell: grep -lx 0b /sys/bus/usb/devices/*/bInterfaceClass || true
+  register: epgstation_card_readers
+  changed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Fail unless a card reader is connected
+  ansible.builtin.assert:
+    that: epgstation_card_readers.stdout_lines | length > 0
+    fail_msg: >-
+      B-CAS カードのカードリーダー（USB の CCID）が見つからない。接続して lsusb で確認すること。
+      カードなしで動かす場合（チャンネルスキャンだけ行う場合など）は epgstation_require_card_reader: false にする
+    quiet: true
+  when: epgstation_require_card_reader
+
+- name: Read the video group
+  ansible.builtin.getent:
+    database: group
+    key: video
+
+- name: Set the video group ID
+  ansible.builtin.set_fact:
+    epgstation_video_gid: "{{ ansible_facts.getent_group.video[1] }}"
+
+# USB がマウントされていなければ、パスは SD カード（/）上になる
+- name: Find the filesystems under the data directories
+  ansible.builtin.command: findmnt -n -o TARGET,FSTYPE --target {{ item | dirname }}
+  loop: "{{ ([epgstation_data_dir, epgstation_mirakurun_data_dir] + epgstation_recorded_dirs | map(attribute='source') | list) | unique }}"
+  register: epgstation_findmnt
+  changed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Fail unless the data directories are on a USB ext4 volume
+  ansible.builtin.assert:
+    that:
+      - item.stdout.split() | first != '/'
+      - item.stdout.split() | last == 'ext4'
+    fail_msg: "{{ item.item }} が USB の ext4 上にない（{{ item.stdout | regex_replace('\\s+', ' ') }}）。SD カードや NTFS（/mnt/share）は使わないこと"
+    quiet: true
+  loop: "{{ epgstation_findmnt.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Check the recorded directories
+  ansible.builtin.stat:
+    path: "{{ item.source }}"
+  loop: "{{ epgstation_recorded_dirs }}"
+  loop_control:
+    label: "{{ item.source }}"
+  register: epgstation_recorded_stat
+
+- name: Check that UID {{ epgstation_uid }} can write to the recorded directories
+  ansible.builtin.command:
+    argv: [setpriv, "--reuid={{ epgstation_uid }}", "--regid={{ epgstation_gid }}", --clear-groups, test, -w, "{{ item.item.source }}"]
+  loop: "{{ epgstation_recorded_stat.results | selectattr('stat.exists') }}"
+  loop_control:
+    label: "{{ item.item.source }}"
+  register: epgstation_recorded_writable
+  changed_when: false
+  failed_when: false
+  check_mode: false  # 読み取りのみ
+
+# 既存のディレクトリの所有者は変更しない（chown しない）。書き込めなければ録画できないので失敗させる
+- name: Fail unless UID {{ epgstation_uid }} can write to the recorded directories
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: >-
+      UID {{ epgstation_uid }} が {{ item.item.item.source }} に書き込めない（録画・エンコードが失敗する）。
+      所有者・パーミッションを手作業で変更すること（例: sudo chown {{ epgstation_uid }}:{{ epgstation_gid }} {{ item.item.item.source }}。中のファイルは変更しなくてよい）
+    quiet: true
+  loop: "{{ epgstation_recorded_writable.results }}"
+  loop_control:
+    label: "{{ item.item.item.source }}"
+
+# ---- ホストの pcscd ----
+# コンテナ内の pcscd がカードリーダーを使う。ホストの pcscd が動いているとカードリーダーを取り合う。
+# ホストの pcscd（Trixie: pcsc-lite 2.x）はコンテナの libpcsclite（Bookworm: 1.9.9）とプロトコルが違い、共有もできない
+- name: Find pcscd on the host
+  ansible.builtin.command: systemctl list-unit-files --no-legend --plain pcscd.socket pcscd.service
+  register: epgstation_host_pcscd
+  changed_when: false
+  failed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Stop and mask pcscd on the host
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    masked: true
+  loop: "{{ epgstation_host_pcscd.stdout_lines | map('split') | map('first') | list }}"
+
+
+# ---- チューナーのファームウェア（PX-S1UD）----
+# カーネル標準の smsusb ドライバで認識されるが、選局にはファームウェア（PLEX のドライバに含まれる）が必要。
+# ないと dmesg に "failed to open firmware file 'isdbt_rio.inp'" が出る
+- name: Check the tuner firmware
+  ansible.builtin.stat:
+    path: "{{ epgstation_firmware_path }}"
+    checksum_algorithm: sha256
+  register: epgstation_firmware_stat
+
+- name: Show the firmware to install (check mode)
+  ansible.builtin.debug:
+    msg: "{{ epgstation_firmware_path }} を {{ epgstation_firmware_zip_url }} から取り出して置き、再起動する予定"
+  when:
+    - ansible_check_mode
+    - epgstation_firmware_stat.stat.checksum | default('') != epgstation_firmware_sha256
+
+- name: Install the tuner firmware
+  when:
+    - not ansible_check_mode
+    - epgstation_firmware_stat.stat.checksum | default('') != epgstation_firmware_sha256
+  block:
+    - name: Create a temporary directory for the driver
+      ansible.builtin.tempfile:
+        state: directory
+      register: epgstation_firmware_tmp
+
+    - name: Download the PX-S1UD driver
+      ansible.builtin.get_url:
+        url: "{{ epgstation_firmware_zip_url }}"
+        dest: "{{ epgstation_firmware_tmp.path }}/driver.zip"
+        checksum: sha256:{{ epgstation_firmware_zip_sha256 }}
+        mode: "0644"
+
+    - name: Extract the firmware
+      ansible.builtin.command:
+        argv: [unzip, -j, -o, "{{ epgstation_firmware_tmp.path }}/driver.zip", "{{ epgstation_firmware_zip_member }}", -d, "{{ epgstation_firmware_tmp.path }}"]
+      changed_when: true
+
+    - name: Install {{ epgstation_firmware_path }}
+      ansible.builtin.copy:
+        src: "{{ epgstation_firmware_tmp.path }}/{{ epgstation_firmware_path | basename }}"
+        dest: "{{ epgstation_firmware_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Check the installed firmware
+      ansible.builtin.stat:
+        path: "{{ epgstation_firmware_path }}"
+        checksum_algorithm: sha256
+      register: epgstation_firmware_installed
+
+    - name: Fail unless the firmware matches
+      ansible.builtin.assert:
+        that: epgstation_firmware_installed.stat.checksum == epgstation_firmware_sha256
+        fail_msg: "{{ epgstation_firmware_path }} のチェックサムが一致しない"
+        quiet: true
+
+    # 読み込ませるには再起動する（チューナーを挿し直すのと同じ）。modprobe -r smsusb でドライバを外すと
+    # カーネルの警告（smsusb_disconnect の中の kfree）が出て、その後チューナーが USB のエラーで切断されることがあるため使わない
+    - name: Reboot to load the tuner firmware
+      ansible.builtin.reboot:
+        msg: Rebooting to load the tuner firmware (epgstation)
+
+    - name: Wait for the tuners
+      ansible.builtin.wait_for:
+        path: /dev/dvb/adapter{{ item.adapter }}/frontend0
+        timeout: 60
+      loop: "{{ epgstation_tuners }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Read the kernel log of this boot
+      ansible.builtin.command: journalctl -k -b -o cat
+      register: epgstation_driver_log
+      changed_when: false
+
+    - name: Fail if the firmware was not loaded
+      ansible.builtin.assert:
+        that: "'failed to open firmware' not in epgstation_driver_log.stdout"
+        fail_msg: "ファームウェアを読み込めなかった: {{ epgstation_driver_log.stdout_lines | select('search', 'firmware') | join(' ') }}"
+        quiet: true
+
+  always:
+    - name: Remove the temporary directory
+      ansible.builtin.file:
+        path: "{{ epgstation_firmware_tmp.path }}"
+        state: absent
+      when: epgstation_firmware_tmp.path is defined
+
+# ---- ディレクトリ ----
+# 既にある録画ディレクトリの所有者は変更しない。ないものだけ作る
+- name: Create the recorded directories
+  ansible.builtin.file:
+    path: "{{ item.item.source }}"
+    state: directory
+    owner: "{{ epgstation_uid }}"
+    group: "{{ epgstation_gid }}"
+    mode: "0755"
+  loop: "{{ epgstation_recorded_stat.results | rejectattr('stat.exists') }}"
+  loop_control:
+    label: "{{ item.item.source }}"
+
+- name: Create {{ epgstation_data_dir }}
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ epgstation_uid }}"
+    group: "{{ epgstation_gid }}"
+    mode: "0755"
+  loop: "{{ [epgstation_data_dir] + epgstation_data_subdirs | map('regex_replace', '^', epgstation_data_dir ~ '/') | list }}"
+
+# Mirakurun は root で動く
+- name: Create {{ epgstation_mirakurun_data_dir }}
+  ansible.builtin.file:
+    path: "{{ epgstation_mirakurun_data_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create {{ epgstation_dir }}
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ epgstation_dir }}"
+    - "{{ epgstation_mirakurun_config_dir }}"
+    - "{{ epgstation_config_dir }}"
+    - "{{ epgstation_build_dir }}"
+
+# ---- イメージ（起動時にネットワークに依存しないよう、先に取得・ビルドしておく）----
+- name: Check whether the images are present
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "--format={{ '{{.Id}}' }}", "{{ item }}"]
+  loop:
+    - "{{ epgstation_mirakurun_image }}"
+    - "{{ epgstation_mariadb_image }}"
+  register: epgstation_image_inspect
+  changed_when: false
+  failed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Pull the images
+  ansible.builtin.command:
+    argv: [docker, pull, --quiet, "{{ item.item }}"]
+  loop: "{{ epgstation_image_inspect.results | rejectattr('rc', 'eq', 0) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  changed_when: true
+
+- name: Write the EPGStation image build files
+  ansible.builtin.template:
+    src: Dockerfile.j2
+    dest: "{{ epgstation_build_dir }}/Dockerfile"
+    mode: "0644"
+
+- name: Copy ffmpeg-hls
+  ansible.builtin.copy:
+    src: ffmpeg-hls
+    dest: "{{ epgstation_build_dir }}/ffmpeg-hls"
+    mode: "0755"
+
+- name: Check whether {{ epgstation_image }} is present
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "--format={{ '{{.Id}}' }}", "{{ epgstation_image }}"]
+  register: epgstation_build_inspect
+  changed_when: false
+  failed_when: false
+  check_mode: false  # 読み取りのみ
+
+# ffmpeg のインストールに数分かかる。古いタグのイメージは残る（docker image prune で消す）
+- name: Build {{ epgstation_image }}
+  ansible.builtin.command:
+    argv: [docker, build, --quiet, --tag, "{{ epgstation_image }}", "{{ epgstation_build_dir }}"]
+  when: epgstation_build_inspect.rc != 0
+  changed_when: true
+
+# ---- 設定 ----
+- name: Write tuners.yml
+  ansible.builtin.template:
+    src: tuners.yml.j2
+    dest: "{{ epgstation_mirakurun_config_dir }}/tuners.yml"
+    mode: "0644"
+  register: epgstation_tuners_file
+  notify: Restart epgstation
+
+# epgstation_channels が空なら、チャンネルスキャンで Mirakurun が書いたものをそのまま使う
+- name: Write channels.yml
+  ansible.builtin.template:
+    src: channels.yml.j2
+    dest: "{{ epgstation_mirakurun_config_dir }}/channels.yml"
+    mode: "0644"
+  when: epgstation_channels | length > 0
+  register: epgstation_channels_file
+  notify: Restart epgstation
+
+# DB のパスワードを含むため、コンテナのユーザー（グループ）だけが読めるようにし、diff にも出さない
+- name: Write config.yml
+  ansible.builtin.template:
+    src: config.yml.j2
+    dest: "{{ epgstation_config_dir }}/config.yml"
+    owner: root
+    group: "{{ epgstation_gid }}"
+    mode: "0640"
+  diff: false
+  register: epgstation_config_file
+  notify: Restart epgstation
+
+- name: Write enc.js
+  ansible.builtin.template:
+    src: enc.js.j2
+    dest: "{{ epgstation_config_dir }}/enc.js"
+    mode: "0644"
+  register: epgstation_enc_file
+  notify: Restart epgstation
+
+- name: Write the log configs
+  ansible.builtin.template:
+    src: logConfig.yml.j2
+    dest: "{{ epgstation_config_dir }}/{{ item }}"
+    mode: "0644"
+  loop:
+    - operatorLogConfig.yml
+    - epgUpdaterLogConfig.yml
+    - serviceLogConfig.yml
+  register: epgstation_log_files
+  notify: Restart epgstation
+
+# DB のパスワードを含むため root だけが読めるようにし、diff にも出さない
+- name: Write compose.yml
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ epgstation_dir }}/compose.yml"
+    owner: root
+    group: root
+    mode: "0600"
+    validate: docker compose -f %s config --quiet
+  diff: false
+  register: epgstation_compose_file
+  notify: Restart epgstation
+
+- name: Check whether epgstation.service is installed
+  ansible.builtin.stat:
+    path: /etc/systemd/system/epgstation.service
+  register: epgstation_unit_stat
+
+- name: Install epgstation.service
+  ansible.builtin.template:
+    src: epgstation.service.j2
+    dest: /etc/systemd/system/epgstation.service
+    mode: "0644"
+  register: epgstation_unit
+  notify:
+    - Reload systemd
+    - Restart epgstation
+
+- name: Apply the changes before starting
+  ansible.builtin.meta: flush_handlers
+
+# --check で初めて導入する場合は、ユニットがまだないので起動しない
+- name: Start epgstation.service
+  ansible.builtin.systemd_service:
+    name: epgstation
+    enabled: true
+    state: started
+  when: not ansible_check_mode or epgstation_unit_stat.stat.exists
+
+# ---- 検証 ----
+# --check で変更する予定の場合は、まだ反映されていないので検証しない
+- name: Verify Mirakurun and EPGStation
+  when: >-
+    not (ansible_check_mode and
+         (epgstation_image_inspect.results | rejectattr('rc', 'eq', 0) | list | length > 0 or epgstation_build_inspect.rc != 0 or
+          epgstation_tuners_file is changed or epgstation_channels_file is changed or epgstation_config_file is changed or
+          epgstation_enc_file is changed or epgstation_log_files is changed or epgstation_compose_file is changed or
+          epgstation_unit is changed))
+  block:
+    - name: Read the containers
+      ansible.builtin.command:
+        argv:
+          - docker
+          - container
+          - inspect
+          - "{{ epgstation_mirakurun_container_name }}"
+          - "{{ epgstation_mariadb_container_name }}"
+          - "{{ epgstation_container_name }}"
+      register: epgstation_inspect
+      changed_when: false
+      check_mode: false  # 読み取りのみ
+
+    - name: Fail unless the containers are running
+      ansible.builtin.assert:
+        that: item.State.Running
+        fail_msg: "{{ item.Name }} が起動していない（{{ item.State.Status }}）"
+        quiet: true
+      loop: "{{ epgstation_inspect.stdout | from_json }}"
+      loop_control:
+        label: "{{ item.Name }}"
+
+    # Mirakurun の API はコンテナの中から確認する（ホストのポートを無効にしていても確認できる）
+    - name: Read the Mirakurun tuners
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ epgstation_mirakurun_container_name }}"
+          - node
+          - -e
+          - fetch('http://127.0.0.1:40772/api/tuners').then(r => r.text()).then(console.log)
+      register: epgstation_mirakurun_tuners
+      until: epgstation_mirakurun_tuners.rc == 0
+      retries: 15
+      delay: 2
+      changed_when: false
+      check_mode: false  # 読み取りのみ
+
+    - name: Fail unless Mirakurun has the tuners
+      ansible.builtin.assert:
+        that:
+          - (epgstation_mirakurun_tuners.stdout | from_json | map(attribute='name') | list) == (epgstation_tuners | map(attribute='name') | list)
+          - epgstation_mirakurun_tuners.stdout | from_json | rejectattr('isAvailable') | list | length == 0
+        fail_msg: "Mirakurun のチューナーが想定と異なるか、使えない: {{ epgstation_mirakurun_tuners.stdout }}"
+        quiet: true
+
+    - name: Read the card in the Mirakurun container
+      ansible.builtin.command:
+        argv: [docker, exec, "{{ epgstation_mirakurun_container_name }}", timeout, "3", pcsc_scan]
+      register: epgstation_pcsc_scan
+      changed_when: false
+      failed_when: false
+      check_mode: false  # 読み取りのみ
+      when: epgstation_require_card_reader
+
+    - name: Fail unless the card is readable
+      ansible.builtin.assert:
+        that: "'Card inserted' in epgstation_pcsc_scan.stdout"
+        fail_msg: >-
+          コンテナ内の pcscd で B-CAS カードを読めない。カードの向き・カードリーダーの接続を確認すること:
+          {{ epgstation_pcsc_scan.stdout_lines | select('search', 'Reader|Card') | join(' / ') }}
+        quiet: true
+      when: epgstation_require_card_reader
+
+    # EPGStation のユーザー（UID・video グループ）でハードウェアエンコーダを使えるか、テスト映像で確認する
+    - name: Check the hardware encoder in the EPGStation container
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ epgstation_container_name }}"
+          - ffmpeg
+          - -hide_banner
+          - -loglevel
+          - error
+          - -f
+          - lavfi
+          - -i
+          - testsrc2=size=1280x720:rate=30
+          - -t
+          - "1"
+          - -c:v
+          - h264_v4l2m2m
+          - -b:v
+          - 3000k
+          - -f
+          - "null"
+          - "-"
+      register: epgstation_encoder_test
+      changed_when: false
+      failed_when: epgstation_encoder_test.rc != 0
+      check_mode: false  # 読み取りのみ
+
+    - name: Check the EPGStation API
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ epgstation_container_name }}"
+          - node
+          - -e
+          - fetch('http://127.0.0.1:8888/api/version').then(r => r.text()).then(console.log)
+      register: epgstation_api_version
+      until: epgstation_api_version.rc == 0 and 'version' in epgstation_api_version.stdout
+      retries: 30
+      delay: 2
+      changed_when: false
+      check_mode: false  # 読み取りのみ

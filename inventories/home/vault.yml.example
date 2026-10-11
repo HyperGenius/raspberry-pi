@@ -10,3 +10,6 @@ vault_bootfs_wifi_password: "your-wifi-password"
 
 # SFTPGo（roles/sftpgo）のユーザーのパスワード。host_vars の sftpgo_users から参照する
 vault_sftpgo_client_password_hash: "$6$..."
+
+# EPGStation（roles/epgstation）の DB（MariaDB）のパスワード。8 文字以上。DB の初期化時にだけ使われる
+vault_epgstation_db_password: "your-db-password"
