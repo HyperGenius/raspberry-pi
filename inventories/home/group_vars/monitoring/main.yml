@@ -1,0 +1,5 @@
+---
+# monitoring グループ共通の変数（roles/alloy）。秘密情報は inventories/<env>/vault.yml で定義し、site.yml の alloy の play だけが読み込む
+alloy_remote_write_url: "{{ vault_grafana_cloud_prometheus_url }}"
+alloy_remote_write_username: "{{ vault_grafana_cloud_prometheus_username }}"
+alloy_remote_write_token: "{{ vault_grafana_cloud_metrics_token }}"

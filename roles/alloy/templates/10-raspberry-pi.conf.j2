@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+# パッケージの ExecStart（/usr/lib/alloy/alloy-wrapper）は --storage.path=/var/lib/alloy/data（SD カード）を固定で付けるため、
+# alloy を直接起動して WAL などを tmpfs（{{ alloy_runtime_dir }}）に置く。
+# {{ alloy_runtime_dir }} はサービスの再起動では消さず（RuntimeDirectoryPreserve）、OS の再起動で消える（未送信のデータも消える）。
+# USB のマウントは待たない（USB が外れても SD カードの容量・温度などは送り続ける）
+[Service]
+RuntimeDirectory={{ alloy_runtime_dir | basename }}
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+ExecStart=
+ExecStart=/usr/bin/alloy run --server.http.listen-addr={{ alloy_listen_addr }} --storage.path={{ alloy_storage_path }} --disable-reporting {{ alloy_config_file }}

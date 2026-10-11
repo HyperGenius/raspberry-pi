@@ -1,0 +1,41 @@
+---
+# Alloy のバージョン（apt のパッケージのバージョン。上げるときは https://github.com/grafana/alloy/releases を確認する）
+alloy_version: 1.20.1
+
+# Grafana の apt リポジトリ
+alloy_apt_repo_url: https://apt.grafana.com
+
+# Grafana Cloud の Prometheus（remote_write）の送信先と認証。値は vault に置き、group_vars から参照する
+#   URL・ユーザー（インスタンス ID）: Grafana Cloud のスタックの Prometheus の「Details」
+#   トークン: Cloud access policy（スコープは metrics:write だけ）のトークン
+alloy_remote_write_url: ""
+alloy_remote_write_username: ""
+alloy_remote_write_token: ""
+
+# instance ラベル（ダッシュボード・アラートでホストを見分ける）
+alloy_instance: "{{ inventory_hostname }}"
+# job ラベル。Grafana Cloud の Linux Server インテグレーションのダッシュボードと同じ値にしておく
+alloy_job: integrations/node_exporter
+
+# 収集の間隔。Grafana Cloud は 1 系列あたり 1 分に 1 点（1 DPM）を前提にしているため、60s より短くしない
+alloy_scrape_interval: 60s
+
+# 有効にするコレクタ（prometheus.exporter.unix の set_collectors。ここにないものは無効）
+alloy_collectors:
+  - cpu           # CPU 使用率
+  - meminfo       # メモリ使用率
+  - loadavg       # ロードアベレージ
+  - filesystem    # ファイルシステムの容量（alloy_filesystem_mount_points だけを送る）
+  - thermal_zone  # CPU の温度（cpu-thermal）
+  - hwmon         # CPU の温度と低電圧の警告（rpi_volt）
+  - uname         # ホストの情報（メトリクスが届いているかの確認に使う）
+
+# 容量を送るマウント先（ここにないマウント先の filesystem のメトリクスは送らない）
+alloy_filesystem_mount_points:
+  - /                # SD カードの p2（root）
+  - /var/lib/docker  # SD カードの p3（Docker）
+  - /mnt/data        # USB（ext4）
+  - /mnt/share       # USB（NTFS）
+
+# Alloy のログレベル（debug / info / warn / error）。ログは journald（RAM 上）に出る
+alloy_log_level: warn

@@ -15,7 +15,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
 │       │   ├── all.yml
 │       │   └── raspberry_pi/
 │       │       └── main.yml
-│       ├── vault.yml         # 秘密情報（ansible-vault で暗号化、Git 管理外。prepare_sd.yml と site.yml の sftpgo・epgstation だけが読み込む）
+│       ├── vault.yml         # 秘密情報（ansible-vault で暗号化、Git 管理外。prepare_sd.yml と site.yml の sftpgo・epgstation・alloy だけが読み込む）
 │       ├── vault.yml.example
 │       └── host_vars/        # ホスト固有の変数（1台 = 1ファイル）
 │           ├── rpi-01.yml
@@ -33,6 +33,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
     ├── sftpgo/               # SFTPGo で USB のディレクトリを LAN に公開する（REST API / WebDAV / Web クライアント）
     ├── epgstation/           # Mirakurun + EPGStation でテレビ番組を録画する（PX-S1UD、ハードウェアエンコード）
     ├── plex/                 # Plex Media Server で USB のディレクトリを LAN に配信する
+    ├── alloy/                # Grafana Alloy でメトリクス（容量・温度・CPU・メモリ）を Grafana Cloud に送る
     └── common/               # 全台共通の初期設定
 ```
 
@@ -452,6 +453,68 @@ ssh -o HostKeyAlias=rpi-01 -i ~/.ssh/id_ed25519_rp4 -L 32400:127.0.0.1:32400 gen
 - ライブラリにするディレクトリは `/mnt/data` 配下の必要なものに限定する。NTFS（`/mnt/share`）は対象外とする
 - Plex のデータ（`/mnt/data/plex`）の容量を監視する（ライブラリが大きくなると数 GB になる）
 
+## 監視（roles/alloy）
+
+[Grafana Alloy](https://grafana.com/docs/alloy/latest/) をホストに apt で導入し、ストレージの容量・CPU の温度・CPU・メモリの使用率を Grafana Cloud（無料枠）の Prometheus に送る。`monitoring` グループのホスト（`hosts.yml`）だけに適用する。ダッシュボード・アラート（Slack への通知）は Grafana Cloud 側で管理する（#22）。
+
+| 構成 | 内容 |
+|---|---|
+| `/etc/apt/sources.list.d/grafana.sources` | Grafana の apt リポジトリ（`apt.grafana.com`） |
+| `/etc/alloy/config.alloy` | Alloy の設定（収集 → ラベル付け → filesystem の絞り込み → 送信） |
+| `/etc/alloy/grafana-cloud-token` | Grafana Cloud のトークン（`root:alloy` の `0640`。`config.alloy` の `local.file` で読み込む） |
+| `/etc/systemd/system/alloy.service.d/10-raspberry-pi.conf` | ExecStart を置き換え、WAL を `/run/alloy/data`（tmpfs）に置き、UI を `127.0.0.1:12345` だけで待ち受ける |
+
+| 変数 | 既定 | 内容 |
+|---|---|---|
+| `alloy_version` | `1.20.1` | Alloy のバージョン（パッケージは hold する） |
+| `alloy_remote_write_url` / `_username` / `_token` | （`group_vars/monitoring` から vault を参照） | Grafana Cloud の Prometheus の送信先・インスタンス ID・トークン |
+| `alloy_instance` | `inventory_hostname` | `instance` ラベル（`rpi-01` など） |
+| `alloy_job` | `integrations/node_exporter` | `job` ラベル（Grafana Cloud の Linux Server インテグレーションと同じ） |
+| `alloy_scrape_interval` | `60s` | 収集の間隔（Grafana Cloud の 1 DPM に合わせる。短くしない） |
+| `alloy_collectors` | `cpu`, `meminfo`, `loadavg`, `filesystem`, `thermal_zone`, `hwmon`, `uname` | 有効にするコレクタ（ほかは無効） |
+| `alloy_filesystem_mount_points` | `/`, `/var/lib/docker`, `/mnt/data`, `/mnt/share` | 容量を送るマウント先（SD カードの p2・p3 と USB） |
+
+| 見たいもの | メトリクス |
+|---|---|
+| ストレージの容量 | `node_filesystem_avail_bytes` / `node_filesystem_size_bytes`（`mountpoint` ラベル） |
+| CPU の温度 | `node_thermal_zone_temp{type="cpu-thermal"}`（`node_hwmon_temp_celsius` も同じ値） |
+| 低電圧の警告 | `node_hwmon_in_lcrit_alarm_volts{chip="soc:firmware_raspberrypi_hwmon"}`（1 で低電圧） |
+| CPU 使用率 | `node_cpu_seconds_total` |
+| メモリ使用率 | `node_memory_MemAvailable_bytes` / `node_memory_MemTotal_bytes` |
+
+- **WAL を SD カードに書かない**: パッケージの ExecStart（`/usr/lib/alloy/alloy-wrapper`）は `--storage.path=/var/lib/alloy/data` を固定で付けるため、drop-in で `alloy run` を直接起動し、`/run/alloy/data`（tmpfs）に置く。サービスの再起動では消えないが（`RuntimeDirectoryPreserve`）、OS の再起動で未送信のデータとともに消える。rpi-01 では 1 分に約 130 系列で、WAL は数十 KB
+- USB のマウントは待たない（USB が外れても、SD カードの容量・温度などは送り続ける）
+- exporter はマウント先を除外の正規表現でしか絞れないため、`prometheus.relabel` で `alloy_filesystem_mount_points` 以外の `node_filesystem_*` を捨てる（`/run`・`/tmp`・`/boot/firmware` などは送らない）
+- 匿名の利用統計の送信（`--disable-reporting`）は無効にしている
+- `config.alloy` は `alloy validate` で検証してから置く。drop-in・`config.alloy`・トークンを変更すると Alloy を再起動する
+- パッケージは hold し、`apt upgrade`（unattended-upgrades を含む）でバージョンが変わらないようにする。上げるときは `alloy_version` を変える
+- 最後に、Alloy の全コンポーネントが正常であること、`127.0.0.1:12345` 以外で待ち受けていないこと、WAL が tmpfs 上にあること、Grafana Cloud への送信に成功していること（`prometheus_remote_storage_samples_total` − `prometheus_remote_storage_samples_failed_total` が 0 より大きい）を確認する。トークンの誤り（401）などで送信できなければ失敗させる
+- `--check` では、Alloy が未インストールの場合はインストールの予定を表示してそこで止まる
+- 単独で実行する場合は `--tags alloy`（または `--tags monitoring`）
+
+事前準備（初回だけ）:
+
+1. [Grafana Cloud](https://grafana.com/) のアカウントとスタックを作る（無料枠ではスタックは 1 つ）
+2. grafana.com の My Account → スタック → Prometheus の「Details」で、Remote Write Endpoint（`https://.../api/prom/push`）と Username / Instance ID（数字）を確認する
+3. Grafana Cloud の Administration → Users and access → Cloud access policies で、Realm をスタック、スコープを **metrics:write だけ**にしたアクセスポリシーを作り、「Add token」でトークンを発行する
+4. vault に追加する（項目は `vault.yml.example` を参照）
+   ```sh
+   ansible-vault edit inventories/home/vault.yml
+   # vault_grafana_cloud_prometheus_url / vault_grafana_cloud_prometheus_username / vault_grafana_cloud_metrics_token
+   ```
+
+```sh
+ansible-playbook playbooks/site.yml --limit rpi-01 --tags alloy --ask-vault-pass
+```
+
+送られているメトリクスは、Grafana Cloud の Explore で `{instance="rpi-01"}` などを指定して確認する。使用量（アクティブ系列）は Administration → Cost management（Usage）で確認する。
+
+運用規約:
+
+- Grafana Cloud のトークンは `metrics:write` だけにする（読み取りや管理の権限を付けない）。Terraform（#22）のトークンとは分ける
+- 容量を送るマウント先を増やすときは `alloy_filesystem_mount_points` に追加する（絞り込みを外して全部送らない）
+- アプリのログの収集はこの role の対象外（別 Issue で扱う）
+
 ## Raspberry Pi を追加する
 
 1. `inventories/home/hosts.yml` にホストを追加
@@ -464,7 +527,7 @@ ssh -o HostKeyAlias=rpi-01 -i ~/.ssh/id_ed25519_rp4 -L 32400:127.0.0.1:32400 gen
 ```sh
 ansible-galaxy collection install -r requirements.yml
 
-# 全台（sftpgo・epgstation グループのホストがあるため vault のパスワードが必要）
+# 全台（sftpgo・epgstation・monitoring グループのホストがあるため vault のパスワードが必要）
 ansible-playbook playbooks/site.yml --ask-vault-pass
 
 # 特定のホストだけ

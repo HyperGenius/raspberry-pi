@@ -1,0 +1,74 @@
+// {{ ansible_managed }}
+logging {
+  level = {{ alloy_log_level | to_json }}
+}
+
+// ---- 収集（node_exporter 相当）----
+prometheus.exporter.unix "node" {
+  set_collectors = {{ alloy_collectors | to_json }}
+}
+
+// ホストを IP ではなく名前で見分ける
+discovery.relabel "node" {
+  targets = prometheus.exporter.unix.node.targets
+
+  rule {
+    target_label = "instance"
+    replacement  = {{ alloy_instance | to_json }}
+  }
+
+  rule {
+    target_label = "job"
+    replacement  = {{ alloy_job | to_json }}
+  }
+}
+
+prometheus.scrape "node" {
+  targets         = discovery.relabel.node.output
+  scrape_interval = {{ alloy_scrape_interval | to_json }}
+  forward_to      = [prometheus.relabel.node.receiver]
+}
+
+// filesystem のメトリクスは alloy_filesystem_mount_points のマウント先だけを送る
+// （tmpfs・/boot/firmware などを送らない。exporter の除外は除外の正規表現しか指定できないため、ここで絞る）
+prometheus.relabel "node" {
+  forward_to = [prometheus.remote_write.{{ alloy_remote_write_name }}.receiver]
+
+  rule {
+    source_labels = ["__name__"]
+    regex         = "node_filesystem_.+"
+    target_label  = "__tmp_drop"
+    replacement   = "true"
+  }
+
+  // 空の値にするとラベルは消える
+  rule {
+    source_labels = ["mountpoint"]
+    regex         = {{ alloy_filesystem_mount_points | map('regex_escape') | join('|') | to_json }}
+    target_label  = "__tmp_drop"
+    replacement   = ""
+  }
+
+  rule {
+    source_labels = ["__tmp_drop"]
+    regex         = "true"
+    action        = "drop"
+  }
+}
+
+// ---- 送信（Grafana Cloud）----
+local.file "grafana_cloud_token" {
+  filename  = {{ alloy_token_file | to_json }}
+  is_secret = true
+}
+
+prometheus.remote_write {{ alloy_remote_write_name | to_json }} {
+  endpoint {
+    url = {{ alloy_remote_write_url | to_json }}
+
+    basic_auth {
+      username = {{ alloy_remote_write_username | string | to_json }}
+      password = local.file.grafana_cloud_token.content
+    }
+  }
+}
