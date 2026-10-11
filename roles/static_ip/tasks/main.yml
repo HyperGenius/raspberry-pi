@@ -1,0 +1,24 @@
+---
+- name: Validate static_ip settings
+  ansible.builtin.assert:
+    that:
+      - static_ip_confirm_timeout < static_ip_rollback_timeout
+      - static_ip_interfaces | map(attribute='ifname') | list | unique | length == static_ip_interfaces | length
+    fail_msg: static_ip_confirm_timeout は static_ip_rollback_timeout より短くし、ifname は重複させないこと
+    quiet: true
+
+# cloud-init が network-config からネットワーク設定を再生成しないようにする
+- name: Disable cloud-init network configuration
+  ansible.builtin.copy:
+    dest: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+    content: "network: {config: disabled}\n"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure static IPv4 address per interface
+  ansible.builtin.include_tasks: interface.yml
+  loop: "{{ static_ip_interfaces }}"
+  loop_control:
+    loop_var: static_ip_if
+    label: "{{ static_ip_if.ifname }}"

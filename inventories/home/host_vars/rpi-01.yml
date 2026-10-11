@@ -1,3 +1,11 @@
 ---
 # rpi-01 固有の変数
 hostname: raspberrypi
+
+# 固定IP（roles/static_ip）。wlan0 のアドレスを変えたら hosts.yml の ansible_host も合わせる
+static_ip_interfaces:
+  - ifname: wlan0
+    address: 192.168.10.55/24
+    gateway: 192.168.10.1
+    dns:
+      - 192.168.10.1

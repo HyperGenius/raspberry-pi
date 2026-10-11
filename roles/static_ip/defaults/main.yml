@@ -1,0 +1,17 @@
+---
+# 固定IPにするインターフェースの一覧（値は host_vars で定義する）
+#   - ifname: wlan0
+#     address: 192.168.10.55/24
+#     gateway: 192.168.10.1
+#     dns: [192.168.10.1]
+static_ip_interfaces: []
+
+# Ansible が接続に使うインターフェース。変更後は ansible_host をこの IF の新しいアドレスに切り替えて再接続する
+static_ip_connect_interface: wlan0
+
+# 変更が確定されないまま、この秒数が過ぎると NetworkManager が元の設定に自動で戻す
+static_ip_rollback_timeout: 120
+# 新しいアドレスへの再接続を待つ秒数（static_ip_rollback_timeout より短くすること）
+static_ip_confirm_timeout: 60
+# 確定前に、Pi からゲートウェイへ ping が通ることを確認する
+static_ip_check_gateway: true
