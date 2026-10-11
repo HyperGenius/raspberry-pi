@@ -43,3 +43,19 @@
       tags: [docker]
     - role: common
       tags: [common]
+
+# SFTPGo で USB のディレクトリを LAN に公開する（sftpgo グループのホストだけ）。
+# ユーザーのパスワードのハッシュを vault から読み込むため --ask-vault-pass が必要。
+# vault は sftpgo タグのタスクを実行するときだけ読み込む（--tags docker などでは不要）
+- name: Serve files with SFTPGo
+  hosts: sftpgo
+  become: true
+  pre_tasks:
+    - name: Load the secrets
+      ansible.builtin.include_vars:
+        file: "{{ inventory_dir }}/vault.yml"
+      tags: [sftpgo]
+  roles:
+    # docker・usb_storage の後に実行する（/mnt/data が USB の ext4 でなければ何もせずに失敗する）
+    - role: sftpgo
+      tags: [sftpgo]

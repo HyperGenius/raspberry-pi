@@ -1,0 +1,19 @@
+# {{ ansible_managed }}
+# SFTPGo（docker compose）。USB（nofail）がマウントされていなければ起動しない（SD カード上の空のディレクトリを公開しない）
+[Unit]
+Description=SFTPGo file server (docker compose)
+Requires=docker.service
+After=docker.service
+RequiresMountsFor={{ sftpgo_share_dir }} {{ sftpgo_tmp_dir }}
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory={{ sftpgo_dir }}
+# イメージは Ansible が取得する（起動時にネットワークに依存しない）
+ExecStart=/usr/bin/docker compose up --detach --wait --pull never --remove-orphans
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

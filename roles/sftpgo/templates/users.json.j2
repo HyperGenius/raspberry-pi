@@ -1,0 +1,17 @@
+{
+  "users": [
+{% for user in sftpgo_users %}
+    {
+      "username": {{ user.name | to_json }},
+      "password": {{ user.password_hash | to_json }},
+      "status": 1,
+      "home_dir": {{ sftpgo_container_share_dir | to_json }},
+      "permissions": {{ user.permissions | to_json }},
+      "filters": {
+        "allowed_ip": {{ user.allowed_networks | default(sftpgo_allowed_networks) | to_json }},
+        "web_client": {{ sftpgo_web_client_disabled | to_json }}
+      }
+    }{{ ',' if not loop.last else '' }}
+{% endfor %}
+  ]
+}

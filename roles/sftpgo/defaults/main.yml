@@ -1,0 +1,33 @@
+---
+# SFTPGo のイメージ（バージョンを固定する。上げるときは https://github.com/drakkan/sftpgo/releases を確認する）
+sftpgo_image: drakkan/sftpgo:v2.7.6
+
+# 公開するディレクトリ（USB の ext4 上にあること。/mnt/share の NTFS は不可）
+sftpgo_share_dir: /mnt/data/encoded
+
+# アップロード中の一時ファイル（multipart のアップロード）の置き場所。SD カードに書かないよう USB 上にする。
+# sftpgo_share_dir の外にする（中に置くとユーザーから見える）
+sftpgo_tmp_dir: /mnt/data/.sftpgo-tmp
+
+# コンテナを動かす UID / GID（アップロードしたファイルの所有者になる）。Pi のユーザーに合わせる
+sftpgo_uid: 1000
+sftpgo_gid: 1000
+
+# ホスト側のポート。0 で無効にする
+sftpgo_http_port: 8080    # REST API と Web クライアント（ブラウザ）
+sftpgo_webdav_port: 10080  # WebDAV（Finder の「サーバへ接続」など）
+sftpgo_sftp_port: 0        # SFTP。22 は OS の sshd が使う
+
+# 接続を許可するネットワーク（CIDR）。空なら制限しない。ユーザーごとに allowed_networks で上書きできる
+sftpgo_allowed_networks: []
+
+# ユーザーの一覧（値は host_vars で定義し、パスワードのハッシュは vault に置く）。ここにないユーザーはログインできない
+#   - name: client
+#     password_hash: "{{ vault_sftpgo_client_password_hash }}"  # openssl passwd -6 で生成
+#     permissions:              # パスごとの権限（SFTPGo の permissions。"*" は全権限）
+#       /: [list, download, upload]
+#     allowed_networks: [...]   # 省略時は sftpgo_allowed_networks
+sftpgo_users: []
+
+# SFTPGo のログレベル（debug / info / warn / error）。ログは Docker の json-file（ローテーションあり）に出る
+sftpgo_log_level: info

@@ -15,7 +15,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
 │       │   ├── all.yml
 │       │   └── raspberry_pi/
 │       │       └── main.yml
-│       ├── vault.yml         # 秘密情報（ansible-vault で暗号化、Git 管理外。prepare_sd.yml だけが読み込む）
+│       ├── vault.yml         # 秘密情報（ansible-vault で暗号化、Git 管理外。prepare_sd.yml と site.yml の sftpgo だけが読み込む）
 │       ├── vault.yml.example
 │       └── host_vars/        # ホスト固有の変数（1台 = 1ファイル）
 │           ├── rpi-01.yml
@@ -30,6 +30,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
     ├── sd_longevity/         # SD カードの延命（swap を zram のみに、journald の揮発化、root の noatime）
     ├── usb_storage/          # 既存の USB ストレージの自動マウント
     ├── docker/               # Docker（データは SD カードの p3、ログのローテーション）
+    ├── sftpgo/               # SFTPGo で USB のディレクトリを LAN に公開する（REST API / WebDAV / Web クライアント）
     └── common/               # 全台共通の初期設定
 ```
 
@@ -213,6 +214,88 @@ Docker 公式の apt リポジトリ（`download.docker.com/linux/debian`）か�
 ansible-playbook playbooks/site.yml --limit rpi-01 --tags docker
 ```
 
+## ファイル共有（roles/sftpgo）
+
+[SFTPGo](https://github.com/drakkan/sftpgo) を Docker で動かし、USB のディレクトリ（既定 `/mnt/data/encoded`）を LAN に公開する。ブラウザ（Web クライアント）に加えて、REST API と WebDAV で一覧・取得・アップロードができる。`sftpgo` グループのホスト（`hosts.yml`）だけに適用する。
+
+| 構成 | 内容 |
+|---|---|
+| `/opt/sftpgo/compose.yml` | docker compose の定義（イメージのバージョンは `sftpgo_image` で固定） |
+| `/opt/sftpgo/users.json` | ユーザーの定義（`sftpgo_users` から生成。`root:<gid>` の `0640`） |
+| `/etc/systemd/system/sftpgo.service` | `docker compose up` / `down` を行う。`RequiresMountsFor` で USB のマウントを待つ |
+| `sftpgo_tmp_dir`（既定 `/mnt/data/.sftpgo-tmp`） | アップロード中の一時ファイル（コンテナの `/tmp`） |
+| Docker の volume `sftpgo_data` | SFTP のホスト鍵（SFTP を有効にした場合） |
+
+| 変数 | 既定 | 内容 |
+|---|---|---|
+| `sftpgo_image` | `drakkan/sftpgo:v2.7.6` | イメージ（バージョンを固定する） |
+| `sftpgo_share_dir` | `/mnt/data/encoded` | 公開するディレクトリ（USB の ext4 上） |
+| `sftpgo_tmp_dir` | `/mnt/data/.sftpgo-tmp` | 一時ファイルの置き場所（USB 上、`sftpgo_share_dir` の外） |
+| `sftpgo_uid` / `sftpgo_gid` | `1000` / `1000` | コンテナの UID / GID（アップロードしたファイルの所有者） |
+| `sftpgo_http_port` | `8080` | REST API と Web クライアント（`0` で無効） |
+| `sftpgo_webdav_port` | `10080` | WebDAV（`0` で無効） |
+| `sftpgo_sftp_port` | `0` | SFTP（`0` で無効。22 は sshd が使う） |
+| `sftpgo_allowed_networks` | `[]` | 接続を許可するネットワーク（CIDR）。空なら制限しない |
+| `sftpgo_users` | `[]` | ユーザーの一覧（`name` / `password_hash` / `permissions` / `allowed_networks`） |
+
+ユーザーは `host_vars/<host>.yml` に書き、パスワードのハッシュは vault に置く。
+
+```yaml
+sftpgo_allowed_networks: [192.168.10.0/24]
+sftpgo_users:
+  - name: client
+    password_hash: "{{ vault_sftpgo_client_password_hash }}"  # openssl passwd -6 で生成し、vault に置く
+    permissions:          # パスごとの権限（SFTPGo の permissions）
+      /: [list, download, upload, create_dirs]
+```
+
+- 権限は `list`（一覧）、`download`、`upload`（新規のみ）、`overwrite`（上書き）、`delete`、`rename`、`create_dirs` など。`"*"` は全権限。`/sub` のようにパスごとに変えられる
+- ユーザーは `users.json` だけで定義する（SFTPGo の memory プロバイダ。DB を持たない）。`sftpgo_users` から消したユーザーはログインできなくなる。Web 管理画面は無効にしている（管理者は作らない）
+- Web クライアントでの共有リンク（ログインなしでアクセスできる）、パスワードの変更、二要素認証などは無効にしている（再起動で消えるため）
+- アップロードはアトミック（同じディレクトリの `.sftpgo-upload.*` に書き、完了したらリネームする）。途中のファイルは元の名前では現れない。コンテナが強制終了した場合などに `.sftpgo-upload.*` が残ることがある
+- multipart のアップロード（Web クライアントからのアップロード、`POST /api/v2/user/files`）は、一時ファイルを `sftpgo_tmp_dir` に書いてから移す。SD カードには書かない
+- 実行前に、`docker compose` が使えること、`sftpgo_share_dir` と `sftpgo_tmp_dir` の親が USB の ext4（`/` 以外のマウント）上にあることを確認する（満たさなければ何も変更せずに失敗する）。UID `sftpgo_uid` が `sftpgo_share_dir` に書き込めない場合は `[要確認]` を表示する（chown はしない）
+- bind mount は `create_host_path: false` にし、systemd のユニットで USB のマウントを待つ。USB がマウントされていなければ起動しない（SD カード上のディレクトリを公開しない）
+- `compose.yml` / `users.json` を変更すると、`sftpgo.service` を再起動してコンテナを作り直す（接続中の転送は切れる）
+- 最後に、コンテナの bind mount が 3 つ（`sftpgo_share_dir`、`sftpgo_tmp_dir`、`users.json`）だけであること、`users.json` を読み込めたこと（ログに `data loading failed` がないこと）、`/healthz` が `ok` を返すことを確認する
+- vault を読み込むため、実行には `--ask-vault-pass` が必要。vault は `sftpgo` タグのタスクでだけ読み込むので、`--tags docker` などでは不要
+- 単独で実行する場合は `--tags sftpgo`
+
+```sh
+openssl passwd -6                                  # パスワードのハッシュを生成
+ansible-vault edit inventories/home/vault.yml      # vault_sftpgo_client_password_hash を追加
+ansible-playbook playbooks/site.yml --limit rpi-01 --tags sftpgo --ask-vault-pass
+```
+
+クライアントからの使い方（`client` ユーザーの場合）:
+
+```sh
+B=http://192.168.10.55:8080
+
+# トークン（20 分有効）を取得する
+T=$(curl -s -u client:PASSWORD $B/api/v2/user/token | jq -r .access_token)
+
+# 一覧
+curl -s -H "Authorization: Bearer $T" "$B/api/v2/user/dirs?path=/カネオくん" | jq
+
+# 取得（Range に対応するので -C - で再開できる）
+curl -H "Authorization: Bearer $T" -o out.mp4 "$B/api/v2/user/files?path=/カネオくん/xxx.mp4"
+
+# アップロード（本文をそのまま送る）
+curl -H "Authorization: Bearer $T" --data-binary @file.mp4 "$B/api/v2/user/files/upload?path=/uploads/file.mp4"
+```
+
+- API の仕様: `http://192.168.10.55:8080/openapi/`（Swagger UI）
+- ブラウザ: `http://192.168.10.55:8080/`（Web クライアント）
+- WebDAV: `http://192.168.10.55:10080/`（Finder の「サーバへ接続」など）
+
+運用規約:
+
+- 公開するディレクトリは `/mnt/data` 配下の必要なものに限定する。NTFS（`/mnt/share`）は対象外とする
+- 認証を必須にする（匿名アクセスを許可しない）。`sftpgo_allowed_networks` で LAN に限定する
+- 削除・上書きの権限（`delete` / `overwrite` / `rename`）は必要なユーザーにだけ与える。API からの削除は取り消せない
+- Pi 上の処理（エンコードなど）と API が同じディレクトリに同時に書き込む場合は、書き込み先を分ける（例: API は `uploads/` に書く）
+
 ## Raspberry Pi を追加する
 
 1. `inventories/home/hosts.yml` にホストを追加
@@ -225,8 +308,8 @@ ansible-playbook playbooks/site.yml --limit rpi-01 --tags docker
 ```sh
 ansible-galaxy collection install -r requirements.yml
 
-# 全台
-ansible-playbook playbooks/site.yml
+# 全台（sftpgo グループのホストがあるため vault のパスワードが必要）
+ansible-playbook playbooks/site.yml --ask-vault-pass
 
 # 特定のホストだけ
 ansible-playbook playbooks/site.yml --limit rpi-01

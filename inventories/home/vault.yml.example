@@ -1,8 +1,12 @@
 ---
 # vault.yml の雛形。以下で暗号化したファイルを作成する（この .example は読み込まれない）。
 #   ansible-vault create inventories/home/vault.yml
+#   ansible-vault edit inventories/home/vault.yml   # 項目を追加する場合
 #
 # パスワードハッシュの生成: openssl passwd -6
 vault_bootfs_user_password_hash: "$6$..."
 vault_bootfs_wifi_ssid: "your-ssid"
 vault_bootfs_wifi_password: "your-wifi-password"
+
+# SFTPGo（roles/sftpgo）のユーザーのパスワード。host_vars の sftpgo_users から参照する
+vault_sftpgo_client_password_hash: "$6$..."

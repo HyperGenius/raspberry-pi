@@ -18,3 +18,13 @@ usb_storage_devices:
   - uuid: 226667176666EACD  # sdb1。Docker の bind mount 先には使わない
     fstype: ntfs
     path: /mnt/share
+
+# SFTPGo（roles/sftpgo）。/mnt/data/encoded を LAN に公開する。パスワードのハッシュは vault に置く
+sftpgo_allowed_networks:
+  - 192.168.10.0/24
+sftpgo_users:
+  # スクリプト用。一覧・取得・アップロードのみ（上書き・削除・リネームは不可）
+  - name: client
+    password_hash: "{{ vault_sftpgo_client_password_hash }}"
+    permissions:
+      /: [list, download, upload, create_dirs]
