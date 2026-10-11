@@ -15,7 +15,7 @@ services:
       # アトミックアップロード: 同じディレクトリの一時ファイル（.sftpgo-upload.*）に書き、完了したらリネームする
       SFTPGO_COMMON__UPLOAD_MODE: "1"
       SFTPGO_HTTPD__BINDINGS__0__PORT: "{{ sftpgo_container_http_port if sftpgo_http_port | int > 0 else 0 }}"
-      # 管理画面は使わない（管理者を作らないため、有効だと初期設定画面から誰でも管理者を作れてしまう）
+      # 管理画面は使わない（管理者は users.json の無効な 1 人だけで、ログインできる管理者はいない）
       SFTPGO_HTTPD__BINDINGS__0__ENABLE_WEB_ADMIN: "false"
       SFTPGO_WEBDAVD__BINDINGS__0__PORT: "{{ sftpgo_container_webdav_port if sftpgo_webdav_port | int > 0 else 0 }}"
       SFTPGO_SFTPD__BINDINGS__0__PORT: "{{ sftpgo_container_sftp_port if sftpgo_sftp_port | int > 0 else 0 }}"
