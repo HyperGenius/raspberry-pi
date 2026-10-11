@@ -1,0 +1,330 @@
+---
+# 実行順序: 設定の検証 → 実行前チェック → ディレクトリ → イメージ → compose.yml・systemd ユニット →（handler で反映）
+#          → サーバーの設定（API）→ 検証
+- name: Validate plex settings
+  ansible.builtin.assert:
+    that:
+      - plex_media_dirs | length > 0
+      - plex_media_dirs | map(attribute='name') | unique | length == plex_media_dirs | length
+      - plex_media_dirs | map(attribute='name') | reject('match', '^[A-Za-z0-9_.-]+$') | list | length == 0
+      - plex_media_dirs | map(attribute='source') | reject('match', '^/.+[^/]$') | list | length == 0
+      - plex_media_dirs | map(attribute='source') | unique | length == plex_media_dirs | length
+      - plex_data_dir is match('^/.+[^/]$')
+      - plex_preferences is mapping
+      - plex_cpu_shares | int >= 2
+    fail_msg: >-
+      plex_media_dirs は 1 つ以上で、name（英数字と _ . -）と source（絶対パス、末尾の / なし）を重複させないこと。
+      plex_data_dir は絶対パス（末尾の / なし）、plex_preferences は設定の id と値の辞書、plex_cpu_shares は 2 以上にすること
+    quiet: true
+
+# Plex のデータをライブラリの中に置くと、メタデータやサムネイルをライブラリとしてスキャンしてしまう
+- name: Fail if the data directory is inside a media directory
+  ansible.builtin.assert:
+    that:
+      - not (plex_data_dir ~ '/').startswith(item.source ~ '/')
+      - not (item.source ~ '/').startswith(plex_data_dir ~ '/')
+    fail_msg: plex_data_dir（{{ plex_data_dir }}）と {{ item.source }} は、一方を他方の中に置かないこと
+    quiet: true
+  loop: "{{ plex_media_dirs }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# ---- 実行前チェック（何も変更する前に確認する）----
+- name: Check that docker compose is available
+  ansible.builtin.command: docker compose version
+  register: plex_compose_version
+  changed_when: false
+  failed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Fail unless docker compose is available
+  ansible.builtin.assert:
+    that: plex_compose_version.rc == 0
+    fail_msg: docker compose が使えない。先に docker role（--tags docker）を実行すること
+    quiet: true
+
+- name: Check the media directories
+  ansible.builtin.stat:
+    path: "{{ item.source }}"
+  loop: "{{ plex_media_dirs }}"
+  loop_control:
+    label: "{{ item.source }}"
+  register: plex_media_stat
+
+- name: Fail unless the media directories exist
+  ansible.builtin.assert:
+    that: item.stat.isdir | default(false)
+    fail_msg: "{{ item.item.source }} がない。USB がマウントされているか確認すること（--tags usb_storage）"
+    quiet: true
+  loop: "{{ plex_media_stat.results }}"
+  loop_control:
+    label: "{{ item.item.source }}"
+
+# USB がマウントされていなければ、パスは SD カード（/）上になる
+- name: Find the filesystems under the data and media directories
+  ansible.builtin.command: findmnt -n -o TARGET,FSTYPE --target {{ item }}
+  loop: "{{ ([plex_data_dir | dirname] + plex_media_dirs | map(attribute='source') | list) | unique }}"
+  register: plex_findmnt
+  changed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Fail unless the directories are on a USB ext4 volume
+  ansible.builtin.assert:
+    that:
+      - item.stdout.split() | first != '/'
+      - item.stdout.split() | last == 'ext4'
+    fail_msg: "{{ item.item }} が USB の ext4 上にない（{{ item.stdout | regex_replace('\\s+', ' ') }}）。SD カードや NTFS（/mnt/share）は使わないこと"
+    quiet: true
+  loop: "{{ plex_findmnt.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Check that UID {{ plex_uid }} can read the media directories
+  ansible.builtin.command:
+    argv: [setpriv, "--reuid={{ plex_uid }}", "--regid={{ plex_gid }}", --clear-groups, test, -r, "{{ item.source }}", -a, -x, "{{ item.source }}"]
+  loop: "{{ plex_media_dirs }}"
+  loop_control:
+    label: "{{ item.source }}"
+  register: plex_media_readable
+  changed_when: false
+  failed_when: false
+  check_mode: false  # 読み取りのみ
+
+# 既存のディレクトリの所有者は変更しない（chown しない）。読めなければライブラリが空になるので失敗させる
+- name: Fail unless UID {{ plex_uid }} can read the media directories
+  ansible.builtin.assert:
+    that: item.rc == 0
+    fail_msg: >-
+      UID {{ plex_uid }} が {{ item.item.source }} を読めない（ライブラリが空になる）。
+      所有者・パーミッションを手作業で変更すること
+    quiet: true
+  loop: "{{ plex_media_readable.results }}"
+  loop_control:
+    label: "{{ item.item.source }}"
+
+# ---- ディレクトリ ----
+# config の下の Library/Application Support も作る（ないとコンテナの初回起動の処理が root の所有で作る）
+- name: Create {{ plex_data_dir }}
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ plex_uid }}"
+    group: "{{ plex_gid }}"
+    mode: "0755"
+  loop: >-
+    {{ [plex_data_dir] + plex_data_subdirs | map('regex_replace', '^', plex_data_dir ~ '/') | list
+       + [plex_preferences_file | dirname | dirname | dirname, plex_preferences_file | dirname | dirname, plex_preferences_file | dirname] }}
+
+- name: Create {{ plex_dir }}
+  ansible.builtin.file:
+    path: "{{ plex_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# ---- イメージ（起動時にネットワークに依存しないよう、先に取得しておく）----
+- name: Check whether {{ plex_image }} is present
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "--format={{ '{{.Id}}' }}", "{{ plex_image }}"]
+  register: plex_image_inspect
+  changed_when: false
+  failed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Pull {{ plex_image }}
+  ansible.builtin.command:
+    argv: [docker, pull, --quiet, "{{ plex_image }}"]
+  when: plex_image_inspect.rc != 0
+  changed_when: true
+
+# ---- 設定 ----
+- name: Write compose.yml
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ plex_dir }}/compose.yml"
+    mode: "0644"
+    validate: docker compose -f %s config --quiet
+  register: plex_compose_file
+  notify: Restart plex
+
+- name: Check whether plex.service is installed
+  ansible.builtin.stat:
+    path: /etc/systemd/system/plex.service
+  register: plex_unit_stat
+
+- name: Install plex.service
+  ansible.builtin.template:
+    src: plex.service.j2
+    dest: /etc/systemd/system/plex.service
+    mode: "0644"
+  register: plex_unit
+  notify:
+    - Reload systemd
+    - Restart plex
+
+- name: Apply the changes before starting
+  ansible.builtin.meta: flush_handlers
+
+# --check で初めて導入する場合は、ユニットがまだないので起動しない
+- name: Start plex.service
+  ansible.builtin.systemd_service:
+    name: plex
+    enabled: true
+    state: started
+  when: not ansible_check_mode or plex_unit_stat.stat.exists
+
+# --check で変更する予定の場合は、まだ反映されていないので設定・検証しない
+- name: Configure and verify Plex
+  when: >-
+    not (ansible_check_mode and
+         (plex_image_inspect.rc != 0 or plex_compose_file is changed or plex_unit is changed))
+  block:
+    # ---- サーバーの設定（Plex の API）----
+    # Preferences.xml を直接書き換えると、Plex が既定値の設定を消して書き戻すため、API で読み書きする
+    - name: Wait until Plex responds
+      ansible.builtin.uri:
+        url: "{{ plex_api_url }}/identity"
+        headers:
+          Accept: application/json
+      register: plex_identity
+      until: plex_identity.status == 200
+      retries: 30
+      delay: 2
+      check_mode: false  # 読み取りのみ
+
+    # 登録（claim）後は API にサーバーのトークンが必要。未登録なら 127.0.0.1 からはトークンなしで使える
+    - name: Read the server token
+      ansible.builtin.slurp:
+        src: "{{ plex_preferences_file }}"
+      register: plex_preferences_xml
+      no_log: true
+
+    - name: Set the API headers
+      ansible.builtin.set_fact:
+        plex_api_headers: >-
+          {{ {'Accept': 'application/json'} | combine(
+               {'X-Plex-Token': plex_token} if plex_token | length > 0 else {}) }}
+      vars:
+        plex_token: >-
+          {{ (plex_preferences_xml.content | b64decode | regex_search('PlexOnlineToken="([^"]+)"', '\1') or ['']) | first }}
+      no_log: true
+
+    # トークンを含むため、結果は assert で表示する
+    - name: Read the server preferences
+      ansible.builtin.uri:
+        url: "{{ plex_api_url }}/:/prefs"
+        headers: "{{ plex_api_headers }}"
+        status_code: [200, 401]
+      register: plex_prefs_get
+      no_log: true
+      check_mode: false  # 読み取りのみ
+
+    - name: Fail unless the server preferences are readable
+      ansible.builtin.assert:
+        that: plex_prefs_get.status == 200
+        fail_msg: "Plex の設定を読めない（HTTP {{ plex_prefs_get.status }}）。Preferences.xml の PlexOnlineToken が無効になっていないか確認すること"
+        quiet: true
+
+    - name: Set the current preferences
+      ansible.builtin.set_fact:
+        plex_prefs_current: "{{ plex_prefs_get.json.MediaContainer.Setting }}"
+
+    - name: Fail if plex_preferences has unknown settings
+      ansible.builtin.assert:
+        that: plex_prefs_unknown | length == 0
+        fail_msg: "plex_preferences に Plex にない設定がある: {{ plex_prefs_unknown | join(', ') }}"
+        quiet: true
+
+    - name: Show the preferences to change (check mode)
+      ansible.builtin.debug:
+        msg: "Plex の設定を変更する予定: {{ plex_prefs_pending }}"
+      when:
+        - ansible_check_mode
+        - plex_prefs_pending | length > 0
+
+    # 再起動しなくても反映される
+    - name: Change the server preferences
+      ansible.builtin.uri:
+        url: "{{ plex_api_url }}/:/prefs?{{ plex_prefs_pending | urlencode }}"
+        method: PUT
+        headers: "{{ plex_api_headers }}"
+        status_code: [200, 400, 401]
+      register: plex_prefs_put
+      changed_when: true
+      no_log: true
+      when:
+        - not ansible_check_mode
+        - plex_prefs_pending | length > 0
+
+    - name: Fail unless the server preferences were changed
+      ansible.builtin.assert:
+        that: plex_prefs_put.status == 200
+        fail_msg: "Plex の設定を変更できない（HTTP {{ plex_prefs_put.status }}）: {{ plex_prefs_pending }}"
+        quiet: true
+      when: plex_prefs_put is not skipped
+
+    - name: Read the server preferences again
+      ansible.builtin.uri:
+        url: "{{ plex_api_url }}/:/prefs"
+        headers: "{{ plex_api_headers }}"
+      register: plex_prefs_check
+      no_log: true
+      check_mode: false  # 読み取りのみ
+      when: plex_prefs_put is not skipped
+
+    - name: Set the changed preferences
+      ansible.builtin.set_fact:
+        plex_prefs_current: "{{ plex_prefs_check.json.MediaContainer.Setting }}"
+      when: plex_prefs_put is not skipped
+
+    - name: Fail unless the server preferences match
+      ansible.builtin.assert:
+        that: plex_prefs_pending | length == 0
+        fail_msg: "Plex の設定が反映されていない: {{ plex_prefs_pending }}"
+        quiet: true
+      when: not ansible_check_mode
+
+    # ---- 検証 ----
+    - name: Read the container
+      ansible.builtin.command: docker container inspect {{ plex_container_name }}
+      register: plex_inspect
+      changed_when: false
+      check_mode: false  # 読み取りのみ
+
+    - name: Set the container state
+      ansible.builtin.set_fact:
+        plex_container: "{{ (plex_inspect.stdout | from_json) | first }}"
+
+    # マウントするのは plex_data_dir の下とライブラリだけ（ライブラリは読み取り専用）
+    - name: Fail unless the container runs with the expected mounts
+      ansible.builtin.assert:
+        that:
+          - plex_container.State.Running
+          - plex_container.HostConfig.NetworkMode == 'host'
+          - plex_container.Mounts | selectattr('Type', 'eq', 'bind') | map(attribute='Source') | sort ==
+            (plex_data_subdirs | map('regex_replace', '^', plex_data_dir ~ '/') | list + plex_media_dirs | map(attribute='source') | list) | sort
+          - plex_container.Mounts | selectattr('Type', 'eq', 'bind') | selectattr('Destination', 'match', '^/data/')
+            | selectattr('RW') | list | length == 0
+        fail_msg: >-
+          コンテナが起動していないか、ネットワーク・bind mount が想定と異なる（Running: {{ plex_container.State.Running }},
+          network: {{ plex_container.HostConfig.NetworkMode }},
+          bind: {{ plex_container.Mounts | selectattr('Type', 'eq', 'bind') | map(attribute='Source') | join(', ') }}）
+        quiet: true
+
+    - name: Check that Plex can read the media directories
+      ansible.builtin.command:
+        argv: [docker, exec, "{{ plex_container_name }}", s6-setuidgid, plex, ls, "/data/{{ item.name }}"]
+      loop: "{{ plex_media_dirs }}"
+      loop_control:
+        label: /data/{{ item.name }}
+      changed_when: false
+      check_mode: false  # 読み取りのみ
+
+    # 登録はブラウザで行う（README）。登録するまでクライアントからは使えない
+    - name: Warn if the server is not claimed
+      ansible.builtin.debug:
+        msg: >-
+          [要確認] Plex のサーバーがまだアカウントに登録されていない。
+          ssh -L 32400:127.0.0.1:32400 で接続し、ブラウザで http://127.0.0.1:32400/web を開いて登録すること（README）
+      when: not plex_identity.json.MediaContainer.claimed | default(false) | bool

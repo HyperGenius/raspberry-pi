@@ -1,0 +1,40 @@
+# {{ ansible_managed }}
+# plex.service（systemd）から起動する。USB のマウントを待つため、直接 docker compose up しない
+name: plex
+services:
+  plex:
+    image: {{ plex_image }}
+    container_name: {{ plex_container_name }}
+    # LAN 内のクライアントからの自動検出（GDM）のため、ホストのネットワークを使う。
+    # ポートは 32400（API・Web）と 32410〜32414/udp（GDM）など。DLNA は plex_preferences で無効にしている
+    network_mode: host
+    restart: unless-stopped
+    # DB を閉じるまで待つ
+    stop_grace_period: 30s
+    # EPGStation（既定の 1024）と CPU を取り合ったときに譲る
+    cpu_shares: {{ plex_cpu_shares }}
+    environment:
+      TZ: {{ timezone | default('Asia/Tokyo') }}
+      # コンテナの plex ユーザーの UID / GID（コンテナを作るたびに合わせる）
+      PLEX_UID: "{{ plex_uid }}"
+      PLEX_GID: "{{ plex_gid }}"
+      # 所有者は Ansible が作るときに合わせる（起動のたびに /config 全体を find しない）
+      CHANGE_CONFIG_DIR_OWNERSHIP: "false"
+    volumes:
+      # USB がマウントされていないときに SD カード上にディレクトリを作らないよう、create_host_path: false にする
+{% for name in plex_data_subdirs %}
+      - type: bind
+        source: {{ plex_data_dir }}/{{ name }}
+        target: /{{ name }}
+        bind:
+          create_host_path: false
+{% endfor %}
+      # ライブラリは読み取り専用（Plex から削除・変更しない）
+{% for dir in plex_media_dirs %}
+      - type: bind
+        source: {{ dir.source }}
+        target: /data/{{ dir.name }}
+        read_only: true
+        bind:
+          create_host_path: false
+{% endfor %}

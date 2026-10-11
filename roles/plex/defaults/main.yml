@@ -1,0 +1,37 @@
+---
+# Plex Media Server の公式イメージ（バージョンを固定する。latest / public / beta は起動のたびにダウンロードするので使わない）
+#   https://hub.docker.com/r/plexinc/pms-docker/tags
+plex_image: plexinc/pms-docker:1.43.4.10903-e5521bd8c
+
+# Plex のデータ（USB の ext4 上）。config（DB・メタデータ・サムネイル）と transcode（トランスコードの一時ファイル）を置く
+plex_data_dir: /mnt/data/plex
+
+# ライブラリにするディレクトリ（USB の ext4 上）。コンテナの /data/<name> に読み取り専用でマウントする。
+# Plex の画面でライブラリを作るときは /data/<name> を指定する
+plex_media_dirs:
+  - name: encoded
+    source: /mnt/data/encoded
+
+# Plex を動かす UID / GID（plex_data_dir の所有者）。ライブラリのディレクトリを読めること
+plex_uid: 1000
+plex_gid: 1000
+
+# CPU の配分の重み（Docker の既定は 1024）。EPGStation（録画・エンコード）と CPU を取り合ったときに譲る。
+# cgroup v2 の cpu.weight では 512 → 59（既定の 1024 → 100）になる
+plex_cpu_shares: 512
+
+# サーバーの設定（Plex の API の /:/prefs で設定する。画面で変えても次の実行で戻る）。
+# キーは Plex の設定の id（https://support.plex.tv/articles/201105343-advanced-hidden-server-settings/ など）。
+# ここにない設定は Plex の画面で変えてよい
+plex_preferences:
+  # LAN の中だけで使う: リモートアクセス（UPnP でルーターのポートを開ける）と Relay（plex.tv 経由の中継）を無効にする
+  PublishServerOnPlexOnlineKey: false
+  RelayEnabled: false
+  # DLNA は認証なしでライブラリを LAN に公開するので無効にする
+  DlnaEnabled: false
+  # ファイルが追加されたら自動でスキャンする（SFTPGo でアップロードしたファイルがすぐ現れる）
+  FSEventLibraryUpdatesEnabled: true
+  # Pi の CPU では重い解析をしない（ビデオプレビューのサムネイル、チャプターのサムネイル、音量の解析）
+  GenerateBIFBehavior: never
+  GenerateChapterThumbBehavior: never
+  LoudnessAnalysisBehavior: never
