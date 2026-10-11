@@ -1,0 +1,6 @@
+---
+# journald のログを置く /run（tmpfs、RAM 上）の上限。超えると古いものから消える（再起動でも消える）
+sd_longevity_journald_runtime_max_use: 50M
+
+# rpi-swap の swap ファイル（swap.conf の File::Path と同じにする）。zram のみにすると rpi-swap が起動時に削除する
+sd_longevity_swap_file: /var/swap

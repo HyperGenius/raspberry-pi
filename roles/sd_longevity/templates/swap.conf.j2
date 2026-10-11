@@ -1,0 +1,4 @@
+# {{ ansible_managed }}
+# swap は zram（RAM 上）だけにする。SD 上の swap ファイル（zram の writeback 先を含む）は使わない
+[Main]
+Mechanism=zram

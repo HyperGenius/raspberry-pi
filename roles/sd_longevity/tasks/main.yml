@@ -1,0 +1,206 @@
+---
+# 実行順序: 実行前チェック → swap（zram のみ）→ journald の揮発化 → root の noatime →（swap が zram だけでなければ再起動）→ 検証
+- name: Validate sd_longevity settings
+  ansible.builtin.assert:
+    that:
+      - sd_longevity_journald_runtime_max_use is match('^[0-9]+[KMGT]?$')
+      - sd_longevity_swap_file is match('^/.+')
+    fail_msg: "sd_longevity_journald_runtime_max_use は数字 + K / M / G / T（例: 50M）、sd_longevity_swap_file は絶対パスにすること"
+    quiet: true
+
+# ---- 実行前チェック ----
+- name: Read the root entry in /etc/fstab
+  ansible.builtin.command: findmnt --fstab -J --mountpoint / -o SOURCE,FSTYPE,OPTIONS,FREQ,PASSNO
+  register: sd_longevity_root_fstab
+  changed_when: false
+  failed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Fail unless /etc/fstab has the root entry
+  ansible.builtin.assert:
+    that: sd_longevity_root_fstab.rc == 0
+    fail_msg: /etc/fstab に / のエントリがない
+    quiet: true
+
+# rpi-swap の設定を変えて再起動しても消えない swap は、この role では扱わない（再起動しても検証に失敗するだけになる）
+- name: List swap entries in /etc/fstab
+  ansible.builtin.command: findmnt --fstab -n -o SOURCE -t swap
+  register: sd_longevity_fstab_swaps
+  changed_when: false
+  failed_when: sd_longevity_fstab_swaps.rc not in [0, 1]
+  check_mode: false  # 読み取りのみ
+
+- name: List active swap devices
+  ansible.builtin.command: swapon --show=NAME --noheadings --raw
+  register: sd_longevity_swaps_before
+  changed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Fail if there is swap that rpi-swap does not manage
+  ansible.builtin.assert:
+    that:
+      - sd_longevity_fstab_swaps.stdout == ''
+      - sd_longevity_swaps_before.stdout_lines | reject('match', '^/dev/zram') | difference([sd_longevity_swap_file]) | length == 0
+    fail_msg: >-
+      rpi-swap 以外の swap がある（fstab: {{ sd_longevity_fstab_swaps.stdout_lines | join(', ') or 'なし' }} /
+      有効な swap: {{ sd_longevity_swaps_before.stdout_lines | join(', ') }}）。SD 上の swap なら手作業で無効にしてから再実行すること
+    quiet: true
+
+# ---- swap（zram のみ。SD 上の swap ファイルは使わない）----
+# Bookworm 以前の swap ファイル（/var/swap）。削除すると swapoff される
+- name: Remove dphys-swapfile
+  ansible.builtin.apt:
+    name: dphys-swapfile
+    state: absent
+    purge: true
+
+# Trixie の swap 管理（systemd の generator）。既定（Mechanism=auto）は zram+file で、
+# SD 上の /var/swap を zram の writeback 先に使う
+- name: Install rpi-swap
+  ansible.builtin.apt:
+    name: rpi-swap
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create /etc/rpi/swap.conf.d
+  ansible.builtin.file:
+    path: "{{ sd_longevity_swap_dropin | dirname }}"
+    state: directory
+    mode: "0755"
+
+# generator が起動時に読むため、反映は再起動で行う（下記）。Mechanism=zram では swap ファイルを rpi-swap が起動時に削除する
+- name: Use zram only for swap
+  ansible.builtin.template:
+    src: swap.conf.j2
+    dest: "{{ sd_longevity_swap_dropin }}"
+    mode: "0644"
+  register: sd_longevity_swap_conf
+
+# ---- journald の揮発化 ----
+- name: Create /etc/systemd/journald.conf.d
+  ansible.builtin.file:
+    path: "{{ sd_longevity_journald_dropin | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Keep the journal in memory only
+  ansible.builtin.template:
+    src: journald.conf.j2
+    dest: "{{ sd_longevity_journald_dropin }}"
+    mode: "0644"
+  register: sd_longevity_journald_conf
+  notify: Restart systemd-journald
+
+# ---- root の noatime ----
+- name: Set the root mount options
+  vars:
+    sd_longevity_root_entry: "{{ (sd_longevity_root_fstab.stdout | from_json).filesystems | first }}"
+    sd_longevity_root_opts_now: "{{ sd_longevity_root_entry.options.split(',') }}"
+  ansible.builtin.set_fact:
+    sd_longevity_root: "{{ sd_longevity_root_entry }}"
+    # atime 系のオプションが noatime だけならそのまま（並びを変えない）。それ以外は atime 系を除いて noatime を付ける
+    sd_longevity_root_opts: >-
+      {{
+        sd_longevity_root_opts_now
+        if sd_longevity_root_opts_now | select('in', sd_longevity_atime_opts) | list == ['noatime'] else
+        sd_longevity_root_opts_now | reject('in', sd_longevity_atime_opts) | list + ['noatime']
+      }}
+
+- name: Add noatime to the root entry in /etc/fstab
+  ansible.posix.mount:
+    path: /
+    src: "{{ sd_longevity_root.source }}"
+    fstype: "{{ sd_longevity_root.fstype }}"
+    opts: "{{ sd_longevity_root_opts | join(',') }}"
+    dump: "{{ sd_longevity_root.freq | string }}"
+    passno: "{{ sd_longevity_root.passno | string }}"
+    state: present
+  register: sd_longevity_root_mount
+
+- name: Read the current root mount options
+  ansible.builtin.command: findmnt -n -o OPTIONS --mountpoint /
+  register: sd_longevity_root_live
+  changed_when: false
+  check_mode: false  # 読み取りのみ
+
+# 再起動しなくても反映する（オンラインで変更できる）
+- name: Remount / with noatime
+  ansible.builtin.command: mount -o remount,noatime /
+  changed_when: true
+  when: "'noatime' not in sd_longevity_root_live.stdout.split(',')"
+
+- name: Apply the journald settings before verifying
+  ansible.builtin.meta: flush_handlers
+
+# ---- swap の反映（zram だけになっていなければ再起動を1回挟む）----
+- name: Check whether swap is zram only
+  ansible.builtin.include_tasks: swap_state.yml
+
+- name: Reboot to apply the swap settings
+  ansible.builtin.reboot:
+    msg: Rebooting to apply the swap settings (sd_longevity)
+  when: not sd_longevity_swap_ok
+
+# ---- 検証 ----
+# --check で変更する予定がある場合は、まだ反映されていないので検証しない
+- name: Verify the settings
+  when: >-
+    not (ansible_check_mode and (
+      not sd_longevity_swap_ok
+      or sd_longevity_journald_conf is changed
+      or 'noatime' not in sd_longevity_root_live.stdout.split(',')
+    ))
+  block:
+    # 再起動直後は、swap ファイルを削除するサービス（multi-user.target で起動する）が終わっていないことがある
+    - name: Wait for rpi-swap to remove {{ sd_longevity_swap_file }}
+      ansible.builtin.wait_for:
+        path: "{{ sd_longevity_swap_file }}"
+        state: absent
+        timeout: 120
+        msg: "{{ sd_longevity_swap_file }} が削除されない（systemctl status 'rpi-remove-swap-file@*' を確認すること）"
+
+    - name: Check whether swap is zram only
+      ansible.builtin.include_tasks: swap_state.yml
+
+    - name: Fail unless swap is zram only
+      ansible.builtin.assert:
+        that: sd_longevity_swap_ok
+        fail_msg: >-
+          swap が zram だけになっていない（有効な swap: {{ sd_longevity_swaps.stdout_lines | join(', ') or 'なし' }} /
+          zram の writeback 先: {{ sd_longevity_backing_devs.results | map(attribute='stdout') | join(', ') or 'なし' }}）
+        quiet: true
+
+    - name: Read the main PID of systemd-journald
+      ansible.builtin.command: systemctl show -P MainPID systemd-journald
+      register: sd_longevity_journald_pid
+      changed_when: false
+      check_mode: false  # 読み取りのみ
+
+    - name: List the files systemd-journald has open
+      ansible.builtin.command: find /proc/{{ sd_longevity_journald_pid.stdout }}/fd -printf '%l\n'
+      register: sd_longevity_journald_files
+      changed_when: false
+      check_mode: false  # 読み取りのみ
+
+    - name: Fail unless the journal is written only to /run/log/journal
+      ansible.builtin.assert:
+        that:
+          - sd_longevity_journald_files.stdout_lines | select('match', '^/var/log/journal/') | list | length == 0
+          - sd_longevity_journald_files.stdout_lines | select('match', '^/run/log/journal/') | list | length > 0
+        fail_msg: >-
+          journald が /var/log/journal（SD）に書き込んでいる
+          （{{ sd_longevity_journald_files.stdout_lines | select('match', '^/(var|run)/log/journal/') | join(', ') }}）
+        quiet: true
+
+    - name: Read the root mount options
+      ansible.builtin.command: findmnt -n -o OPTIONS --mountpoint /
+      register: sd_longevity_root_live_after
+      changed_when: false
+      check_mode: false  # 読み取りのみ
+
+    - name: Fail unless / is mounted with noatime
+      ansible.builtin.assert:
+        that: "'noatime' in sd_longevity_root_live_after.stdout.split(',')"
+        fail_msg: "/ が noatime でマウントされていない（{{ sd_longevity_root_live_after.stdout }}）"
+        quiet: true

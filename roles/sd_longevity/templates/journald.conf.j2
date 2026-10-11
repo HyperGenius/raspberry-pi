@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# ログは /run/log/journal（RAM 上）にだけ置き、/var/log/journal（SD）には書かない
+[Journal]
+Storage=volatile
+RuntimeMaxUse={{ sd_longevity_journald_runtime_max_use }}
