@@ -1,0 +1,31 @@
+---
+# /var/lib/docker にマウントされているべきデバイス（sd_partition role の p3）
+docker_data_device: /dev/mmcblk0p3
+docker_data_fstype: ext4
+
+# コンテナのログ（json-file）のローテーション。1コンテナあたり最大 max-size × max-file
+docker_log_max_size: 10m
+docker_log_max_file: 3
+
+# Docker 29 以降の新規インストールでは containerd の image store が既定になり、イメージを /var/lib/containerd（root パーティション）に置く。
+# false にして、イメージもコンテナも /var/lib/docker（p3）に置く（overlay2）
+docker_containerd_snapshotter: false
+
+# 64bit の Raspberry Pi OS は Debian のリポジトリを使う
+docker_apt_repo_url: https://download.docker.com/linux/debian
+
+docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+
+# Debian 由来のパッケージは docker-ce と競合するので削除する
+docker_conflicting_packages:
+  - docker.io
+  - docker-compose
+  - docker-doc
+  - podman-docker
+  - containerd
+  - runc

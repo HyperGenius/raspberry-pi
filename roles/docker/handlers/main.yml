@@ -1,0 +1,10 @@
+---
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+# daemon.json の変更を反映する（実行中のコンテナも再起動される）
+- name: Restart docker
+  ansible.builtin.systemd_service:
+    name: docker
+    state: restarted

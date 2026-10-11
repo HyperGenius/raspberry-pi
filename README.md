@@ -28,6 +28,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
     ├── static_ip/            # 固定IP
     ├── sd_partition/         # SD カードのパーティション構成（root の拡張と Docker 用領域）
     ├── usb_storage/          # 既存の USB ストレージの自動マウント
+    ├── docker/               # Docker（データは SD カードの p3、ログのローテーション）
     └── common/               # 全台共通の初期設定
 ```
 
@@ -153,6 +154,33 @@ usb_storage_devices:
 
 ```sh
 ansible-playbook playbooks/site.yml --limit rpi-01 --tags usb_storage
+```
+
+## Docker（roles/docker）
+
+Docker 公式の apt リポジトリ（`download.docker.com/linux/debian`）から Docker Engine と compose / buildx プラグインをインストールする。データは `/var/lib/docker`（SD カードの p3、`roles/sd_partition`）に置く。
+
+- 実行前に `/var/lib/docker` に `docker_data_device`（既定 `/dev/mmcblk0p3`、ext4）がマウントされていることを確認し、されていなければ何も変更せずに失敗する。`sd_partition` role の後に実行すること
+- `/etc/systemd/system/docker.service.d/10-mounts.conf` に `RequiresMountsFor=/var/lib/docker` を置き、起動時に p3 のマウントが完了してから dockerd を起動する
+- `/etc/docker/daemon.json` でコンテナのログ（json-file）をローテーションする。変更すると Docker を再起動する（実行中のコンテナも再起動される）。ログ設定はコンテナの作成時に決まるため、既存のコンテナには作り直すまで反映されない
+
+| 変数 | 既定 | 内容 |
+|---|---|---|
+| `docker_log_max_size` | `10m` | ログファイル1つの最大サイズ |
+| `docker_log_max_file` | `3` | 残すログファイルの数 |
+| `docker_containerd_snapshotter` | `false` | containerd の image store を使うか |
+
+- Docker 29 以降の新規インストールでは containerd の image store が既定になり、イメージが `/var/lib/containerd`（root パーティション）に置かれる。`docker_containerd_snapshotter: false` でこれを無効にし、イメージも `/var/lib/docker`（p3、storage driver は overlay2）に置く。切り替えると、切り替える前に pull したイメージは見えなくなる
+- 最後に `docker info` の Docker Root Dir が `/var/lib/docker` で、その実体が p3 であることを確認する
+- `--check` では、Docker が未インストールの場合はインストールの予定を表示してそこで止まる
+- 単独で実行する場合は `--tags docker`
+
+運用規約:
+
+- 大きなファイルの bind mount 先は `/mnt/data`（USB の ext4）に限定する。p3 はイメージとコンテナ用で、SD カードの容量は小さい
+
+```sh
+ansible-playbook playbooks/site.yml --limit rpi-01 --tags docker
 ```
 
 ## Raspberry Pi を追加する
