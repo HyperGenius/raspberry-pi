@@ -1,0 +1,41 @@
+---
+# 既存のデータを使うため、mkfs と chown は行わない（fstab への登録とマウントだけ）
+- name: Validate usb_storage settings
+  ansible.builtin.assert:
+    that:
+      - usb_storage_devices | map(attribute='fstype') | difference(['ext4', 'ntfs']) | length == 0
+      - usb_storage_devices | map(attribute='uuid') | unique | length == usb_storage_devices | length
+      - usb_storage_devices | map(attribute='path') | unique | length == usb_storage_devices | length
+      - usb_storage_devices | map(attribute='path') | reject('match', '^/.+') | length == 0
+    fail_msg: fstype は ext4 か ntfs、path は絶対パスにし、uuid と path は重複させないこと
+    quiet: true
+
+# カーネル内蔵の ntfs3 を優先し、使えなければ ntfs-3g（FUSE）を使う
+- name: Choose the NTFS driver
+  when: usb_storage_devices | selectattr('fstype', 'eq', 'ntfs') | length > 0
+  block:
+    - name: Check whether the kernel has ntfs3
+      ansible.builtin.command: modinfo ntfs3
+      register: usb_storage_ntfs3
+      changed_when: false
+      failed_when: false
+      check_mode: false  # 読み取りのみ
+
+    - name: Install ntfs-3g
+      ansible.builtin.apt:
+        name: ntfs-3g
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      when: usb_storage_ntfs3.rc != 0
+
+    - name: Set the NTFS driver
+      ansible.builtin.set_fact:
+        usb_storage_ntfs_fstype: "{{ 'ntfs3' if usb_storage_ntfs3.rc == 0 else 'ntfs-3g' }}"
+
+- name: Mount USB storage devices
+  ansible.builtin.include_tasks: device.yml
+  loop: "{{ usb_storage_devices }}"
+  loop_control:
+    loop_var: usb_storage_dev
+    label: "{{ usb_storage_dev.path }}"

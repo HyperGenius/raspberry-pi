@@ -1,0 +1,127 @@
+---
+# ---- 実行前チェック（別のディスクを誤ってマウントしないよう、何も変更する前に確認する）----
+- name: Find the device with UUID={{ usb_storage_dev.uuid }}
+  ansible.builtin.command: blkid -U {{ usb_storage_dev.uuid }}
+  register: usb_storage_blkdev
+  changed_when: false
+  failed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Fail unless the device is connected
+  ansible.builtin.assert:
+    that: usb_storage_blkdev.rc == 0
+    fail_msg: "UUID={{ usb_storage_dev.uuid }}（{{ usb_storage_dev.path }}）のデバイスが見つからない。USB が接続されているか確認すること"
+    quiet: true
+
+- name: Read the filesystem type of {{ usb_storage_blkdev.stdout }}
+  ansible.builtin.command: blkid -o value -s TYPE {{ usb_storage_blkdev.stdout }}
+  register: usb_storage_blktype
+  changed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Fail unless the filesystem type is {{ usb_storage_dev.fstype }}
+  ansible.builtin.assert:
+    that: usb_storage_blktype.stdout == usb_storage_dev.fstype
+    fail_msg: "{{ usb_storage_blkdev.stdout }}（UUID={{ usb_storage_dev.uuid }}）のファイルシステムが {{ usb_storage_blktype.stdout }} になっている（期待値 {{ usb_storage_dev.fstype }}）"
+    quiet: true
+
+- name: Set the mount settings
+  ansible.builtin.set_fact:
+    usb_storage_fstype: "{{ usb_storage_ntfs_fstype if usb_storage_dev.fstype == 'ntfs' else usb_storage_dev.fstype }}"
+    usb_storage_opts: >-
+      {{
+        [usb_storage_dev.opts | default(usb_storage_ext4_opts)]
+        if usb_storage_dev.fstype == 'ext4' else
+        [usb_storage_dev.opts | default(usb_storage_ntfs_opts),
+         'uid=' ~ usb_storage_dev.uid | default(usb_storage_ntfs_uid),
+         'gid=' ~ usb_storage_dev.gid | default(usb_storage_ntfs_gid),
+         'umask=' ~ usb_storage_dev.umask | default(usb_storage_ntfs_umask)]
+      }}
+
+# ---- デスクトップの自動マウントの解除 ----
+# デスクトップ（udisks2）が /media/<user>/<label> に自動マウントしていると、同じデバイスを二重にマウントすることになる
+# （オプションも先にマウントした側のものになる）。fstab に登録した後は起動時に指定のパスにマウントされるので、自動マウントされなくなる
+- name: List where {{ usb_storage_blkdev.stdout }} is mounted
+  ansible.builtin.command: findmnt -n --list -o TARGET --source {{ usb_storage_blkdev.stdout }}
+  register: usb_storage_targets
+  changed_when: false
+  failed_when: usb_storage_targets.rc not in [0, 1]
+  check_mode: false  # 読み取りのみ
+
+- name: Unmount desktop automounts of {{ usb_storage_blkdev.stdout }}
+  ansible.posix.mount:
+    path: "{{ item }}"
+    state: unmounted
+  loop: "{{ usb_storage_targets.stdout_lines | select('match', '^(/run)?/media/') | list }}"
+
+# ---- マウント ----
+# マウントポイントのディレクトリは ansible.posix.mount が作る（マウント済みのディレクトリの所有者・パーミッションは変更しない）
+- name: Mount {{ usb_storage_dev.path }}
+  block:
+    - name: Mount UUID={{ usb_storage_dev.uuid }} on {{ usb_storage_dev.path }}
+      ansible.posix.mount:
+        path: "{{ usb_storage_dev.path }}"
+        src: UUID={{ usb_storage_dev.uuid }}
+        fstype: "{{ usb_storage_fstype }}"
+        opts: "{{ (usb_storage_opts + [usb_storage_boot_opts]) | join(',') }}"
+        dump: "0"
+        passno: "{{ '2' if usb_storage_dev.fstype == 'ext4' else '0' }}"
+        state: mounted
+      register: usb_storage_mount
+      notify: Reload systemd
+
+  rescue:
+    - name: Fail with the reason
+      ansible.builtin.fail:
+        msg: "{{ usb_storage_dev.path }} にマウントできなかった（{{ ansible_failed_result.msg | default('') }}）。{{ usb_storage_ntfs_hint if usb_storage_dev.fstype == 'ntfs' else '' }}"
+
+# ---- 検証（nofail を付けているため、マウントに失敗しても起動時には気づけない）----
+# --check でマウントする予定の場合は、まだマウントされていないので検証しない
+- name: Verify {{ usb_storage_dev.path }}
+  when: not (ansible_check_mode and usb_storage_mount is changed)
+  block:
+    - name: Read the mount on {{ usb_storage_dev.path }}
+      ansible.builtin.command: findmnt -J -o SOURCE,FSTYPE,OPTIONS --mountpoint {{ usb_storage_dev.path }}
+      register: usb_storage_findmnt
+      changed_when: false
+      failed_when: false
+      check_mode: false  # 読み取りのみ
+
+    - name: Set the current mount
+      ansible.builtin.set_fact:
+        usb_storage_current: "{{ (usb_storage_findmnt.stdout | from_json).filesystems | first if usb_storage_findmnt.rc == 0 else {} }}"
+
+    # NTFS は dirty フラグが立っていると、読み書き可能なマウントに失敗したり読み取り専用になったりする
+    - name: Fail unless {{ usb_storage_dev.path }} is mounted read-write
+      ansible.builtin.assert:
+        that:
+          - usb_storage_current.source | default('') == usb_storage_blkdev.stdout
+          - "'rw' in usb_storage_current.options | default('') | split(',')"
+        fail_msg: >-
+          {{ usb_storage_dev.path }} に {{ usb_storage_blkdev.stdout }} が読み書き可能でマウントされていない（{{ usb_storage_current.source | default('マウントなし') }}
+          {{ usb_storage_current.options | default('') }}）。{{ usb_storage_ntfs_hint if usb_storage_dev.fstype == 'ntfs' else '' }}
+        quiet: true
+
+    - name: Check that {{ usb_storage_write_user }} can write to {{ usb_storage_dev.path }}
+      ansible.builtin.command:
+        argv: [runuser, -u, "{{ usb_storage_write_user }}", --, test, -w, "{{ usb_storage_dev.path }}"]
+      register: usb_storage_writable
+      changed_when: false
+      failed_when: false
+      check_mode: false  # 読み取りのみ
+
+    # NTFS の所有者はマウントオプションで決まるので、書き込めなければ設定の誤り
+    - name: Fail unless {{ usb_storage_write_user }} can write to the NTFS volume
+      ansible.builtin.assert:
+        that: usb_storage_writable.rc == 0
+        fail_msg: "{{ usb_storage_write_user }} が {{ usb_storage_dev.path }} に書き込めない。uid / gid / umask を確認すること"
+        quiet: true
+      when: usb_storage_dev.fstype == 'ntfs'
+
+    # ext4 は既存のファイルの所有者を変更しない（chown しない）ため、書き込めなくても失敗させず、手作業で判断する
+    - name: Warn if {{ usb_storage_write_user }} cannot write to the ext4 volume
+      ansible.builtin.debug:
+        msg: >-
+          [要確認] {{ usb_storage_write_user }} が {{ usb_storage_dev.path }} に書き込めない。既存ファイルの所有者（UID）が
+          Pi のユーザーと一致していない可能性がある。所有者の変更は手作業で判断すること
+      when: usb_storage_dev.fstype == 'ext4' and usb_storage_writable.rc != 0

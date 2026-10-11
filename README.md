@@ -27,6 +27,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
     ├── bootfs/               # bootfs の user-data / network-config / meta-data / cmdline.txt
     ├── static_ip/            # 固定IP
     ├── sd_partition/         # SD カードのパーティション構成（root の拡張と Docker 用領域）
+    ├── usb_storage/          # 既存の USB ストレージの自動マウント
     └── common/               # 全台共通の初期設定
 ```
 
@@ -113,6 +114,45 @@ static_ip_interfaces:
 ```sh
 ansible-playbook playbooks/site.yml --limit rpi-01 --tags sd_partition --check   # 予定を確認
 ansible-playbook playbooks/site.yml --limit rpi-01 --tags sd_partition
+```
+
+## USB ストレージ（roles/usb_storage）
+
+大きなファイルは既存の外付け USB メモリに置く。既存のデータをそのまま使い、自動マウントの設定（fstab への登録とマウント）だけを行う。**mkfs と chown は行わない。**
+
+`host_vars/<host>.yml` の `usb_storage_devices` に書く（UUID は `lsblk -f` で確認する）。
+
+```yaml
+usb_storage_devices:
+  - uuid: 96efbf0e-c2e7-4007-b81d-1177c5f73fdc
+    fstype: ext4
+    path: /mnt/data
+  - uuid: 226667176666EACD
+    fstype: ntfs
+    path: /mnt/share
+```
+
+| FS | マウントオプション |
+|---|---|
+| ext4 | `defaults,noatime`（`usb_storage_ext4_opts`）、passno 2 |
+| NTFS | `defaults,noatime` + `uid` / `gid` / `umask`（`usb_storage_ntfs_uid` / `_gid` / `_umask`、既定 `1000` / `1000` / `022`）、passno 0 |
+
+- `UUID=...` でマウントする（`/dev/sdX` の順番には依存しない）
+- 全デバイスに `nofail,x-systemd.device-timeout=10s` を付け、USB が未接続でも起動が止まらないようにする
+- NTFS はカーネル内蔵の `ntfs3` を使う。使えない場合は `ntfs-3g` をインストールして使う
+- 実行前に、UUID のデバイスが接続されていること・ファイルシステムが `fstype` と一致することを確認する（満たさなければ何も変更せずに失敗する）
+- デスクトップ（udisks2）が `/media/<user>/...` に自動マウントしている場合は、アンマウントしてから指定のパスにマウントする
+- `nofail` によりマウントの失敗に起動時には気づけないため、最後に指定のパスに読み書き可能でマウントされていることを確認し、されていなければ失敗させる。NTFS は dirty フラグ（Windows で安全に取り外さなかった、高速スタートアップなど）が立っていると、マウントに失敗したり読み取り専用になったりする。その場合は Windows で `chkdsk /f` を実行するか、`sudo ntfsfix -d /dev/sdX1` を実行してから再実行する
+- `usb_storage_write_user`（既定は `ansible_user`）で書き込めることを確認する。NTFS で書き込めなければ失敗させ、ext4 では `[要確認]` を表示するだけにする
+- 単独で実行する場合は `--tags usb_storage`
+
+運用規約:
+
+- NTFS（`/mnt/share`）は Docker の bind mount 先に使用しない（Linux の所有者・パーミッションを保持できないため）
+- ext4（`/mnt/data`）の既存ファイルの UID が Pi 上のユーザーと一致しない場合（`[要確認]` が表示される）は、所有者を変更するかどうかを手作業で判断する。role では chown しない
+
+```sh
+ansible-playbook playbooks/site.yml --limit rpi-01 --tags usb_storage
 ```
 
 ## Raspberry Pi を追加する
