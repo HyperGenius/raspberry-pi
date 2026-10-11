@@ -1,0 +1,34 @@
+---
+# compose.yml・users.json を置くディレクトリ（docker compose のプロジェクトディレクトリ）
+sftpgo_dir: /opt/sftpgo
+sftpgo_container_name: sftpgo
+
+# コンテナ内のパス
+sftpgo_container_share_dir: /srv/share
+sftpgo_container_users_file: /etc/sftpgo/users.json
+
+# コンテナ内のポート（1024 未満は UID 1000 では使えないため、ホスト側のポートとは分ける）
+sftpgo_container_http_port: 8080
+sftpgo_container_webdav_port: 10080
+sftpgo_container_sftp_port: 2022
+
+# 公開するポート（ホスト側が 0 のものは除く）
+sftpgo_ports: >-
+  {{
+    [{'host': sftpgo_http_port | int, 'container': sftpgo_container_http_port},
+     {'host': sftpgo_webdav_port | int, 'container': sftpgo_container_webdav_port},
+     {'host': sftpgo_sftp_port | int, 'container': sftpgo_container_sftp_port}]
+    | rejectattr('host', 'eq', 0) | list
+  }}
+
+# Web クライアントで使わせない機能。ユーザーは users.json だけで定義する（memory プロバイダのため、
+# 画面からの変更は再起動で消える）。共有リンクはログインなしでアクセスできるため無効にする
+sftpgo_web_client_disabled:
+  - password-change-disabled
+  - password-reset-disabled
+  - publickey-change-disabled
+  - tls-cert-change-disabled
+  - mfa-disabled
+  - api-key-auth-change-disabled
+  - info-change-disabled
+  - shares-disabled

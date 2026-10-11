@@ -1,0 +1,225 @@
+---
+# 実行順序: 設定の検証 → 実行前チェック → イメージ → 一時ディレクトリ・users.json・compose.yml・systemd ユニット →（handler で反映）→ 検証
+- name: Validate sftpgo settings
+  ansible.builtin.assert:
+    that:
+      - sftpgo_users | length > 0
+      - sftpgo_users | map(attribute='name') | unique | length == sftpgo_users | length
+      - sftpgo_users | map(attribute='password_hash') | reject('match', '^\$') | list | length == 0
+      - sftpgo_users | map(attribute='permissions') | reject('mapping') | list | length == 0
+      - sftpgo_ports | length > 0
+      - sftpgo_ports | map(attribute='host') | unique | length == sftpgo_ports | length
+      - sftpgo_ports | map(attribute='host') | reject('ge', 1) | list | length == 0
+      - sftpgo_ports | map(attribute='host') | reject('le', 65535) | list | length == 0
+      - 22 not in sftpgo_ports | map(attribute='host')
+      - sftpgo_share_dir is match('^/.+[^/]$')
+      - sftpgo_tmp_dir is match('^/.+[^/]$')
+      - not (sftpgo_tmp_dir ~ '/').startswith(sftpgo_share_dir ~ '/')
+      # SFTP のホスト鍵を置く volume は、イメージの sftpgo ユーザー（1000:1000）の所有で作られる
+      - sftpgo_sftp_port | int == 0 or (sftpgo_uid | int == 1000 and sftpgo_gid | int == 1000)
+    fail_msg: >-
+      sftpgo_users は 1 人以上で name を重複させず、password_hash は openssl passwd -6 のハッシュ、permissions はパスごとの権限にすること。
+      ポートは 1 つ以上を有効にし、重複させず、22（sshd）は使わないこと。sftpgo_share_dir・sftpgo_tmp_dir は絶対パス（末尾の / なし）にし、
+      sftpgo_tmp_dir は sftpgo_share_dir の外に置くこと。SFTP を有効にする場合は sftpgo_uid / sftpgo_gid を 1000 にすること
+    quiet: true
+
+# ---- 実行前チェック（何も変更する前に確認する）----
+- name: Check that docker compose is available
+  ansible.builtin.command: docker compose version
+  register: sftpgo_compose_version
+  changed_when: false
+  failed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Fail unless docker compose is available
+  ansible.builtin.assert:
+    that: sftpgo_compose_version.rc == 0
+    fail_msg: docker compose が使えない。先に docker role（--tags docker）を実行すること
+    quiet: true
+
+- name: Check {{ sftpgo_share_dir }}
+  ansible.builtin.stat:
+    path: "{{ sftpgo_share_dir }}"
+  register: sftpgo_share_stat
+
+- name: Fail unless {{ sftpgo_share_dir }} exists
+  ansible.builtin.assert:
+    that: sftpgo_share_stat.stat.isdir | default(false)
+    fail_msg: "{{ sftpgo_share_dir }} がない。USB がマウントされているか確認すること（--tags usb_storage）"
+    quiet: true
+
+# USB がマウントされていなければ、パスは SD カード（/）上になる
+- name: Find the filesystems under the shared and temporary directories
+  ansible.builtin.command: findmnt -n -o TARGET,FSTYPE --target {{ item }}
+  loop:
+    - "{{ sftpgo_share_dir }}"
+    - "{{ sftpgo_tmp_dir | dirname }}"
+  register: sftpgo_findmnt
+  changed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Fail unless the directories are on a USB ext4 volume
+  ansible.builtin.assert:
+    that:
+      - item.stdout.split() | first != '/'
+      - item.stdout.split() | last == 'ext4'
+    fail_msg: "{{ item.item }} が USB の ext4 上にない（{{ item.stdout | regex_replace('\\s+', ' ') }}）。SD カードや NTFS（/mnt/share）は使わないこと"
+    quiet: true
+  loop: "{{ sftpgo_findmnt.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Check that UID {{ sftpgo_uid }} can write to {{ sftpgo_share_dir }}
+  ansible.builtin.command:
+    argv: [setpriv, "--reuid={{ sftpgo_uid }}", "--regid={{ sftpgo_gid }}", --clear-groups, test, -w, "{{ sftpgo_share_dir }}"]
+  register: sftpgo_share_writable
+  changed_when: false
+  failed_when: false
+  check_mode: false  # 読み取りのみ
+
+# 既存のファイルの所有者は変更しない（chown しない）ため、書き込めなくても失敗させず、手作業で判断する
+- name: Warn if UID {{ sftpgo_uid }} cannot write to {{ sftpgo_share_dir }}
+  ansible.builtin.debug:
+    msg: >-
+      [要確認] UID {{ sftpgo_uid }} が {{ sftpgo_share_dir }} に書き込めない。アップロードは失敗する（読み取りはできる）。
+      所有者・パーミッションの変更は手作業で判断すること
+  when: sftpgo_share_writable.rc != 0
+
+# ---- イメージ（起動時にネットワークに依存しないよう、先に取得しておく）----
+- name: Check whether {{ sftpgo_image }} is present
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "--format={{ '{{.Id}}' }}", "{{ sftpgo_image }}"]
+  register: sftpgo_image_inspect
+  changed_when: false
+  failed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Pull {{ sftpgo_image }}
+  ansible.builtin.command:
+    argv: [docker, pull, --quiet, "{{ sftpgo_image }}"]
+  when: sftpgo_image_inspect.rc != 0
+  changed_when: true
+
+# ---- 設定 ----
+- name: Create {{ sftpgo_tmp_dir }}
+  ansible.builtin.file:
+    path: "{{ sftpgo_tmp_dir }}"
+    state: directory
+    owner: "{{ sftpgo_uid }}"
+    group: "{{ sftpgo_gid }}"
+    mode: "0700"
+
+- name: Create {{ sftpgo_dir }}
+  ansible.builtin.file:
+    path: "{{ sftpgo_dir }}"
+    state: directory
+    mode: "0755"
+
+# パスワードのハッシュを含むため、コンテナのユーザー（グループ）だけが読めるようにし、diff にも出さない
+- name: Write the users
+  ansible.builtin.template:
+    src: users.json.j2
+    dest: "{{ sftpgo_dir }}/users.json"
+    owner: root
+    group: "{{ sftpgo_gid }}"
+    mode: "0640"
+    validate: python3 -m json.tool %s
+  diff: false
+  register: sftpgo_users_file
+  notify: Restart sftpgo
+
+- name: Write compose.yml
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: "{{ sftpgo_dir }}/compose.yml"
+    mode: "0644"
+    validate: docker compose -f %s config --quiet
+  register: sftpgo_compose_file
+  notify: Restart sftpgo
+
+- name: Check whether sftpgo.service is installed
+  ansible.builtin.stat:
+    path: /etc/systemd/system/sftpgo.service
+  register: sftpgo_unit_stat
+
+- name: Install sftpgo.service
+  ansible.builtin.template:
+    src: sftpgo.service.j2
+    dest: /etc/systemd/system/sftpgo.service
+    mode: "0644"
+  register: sftpgo_unit
+  notify:
+    - Reload systemd
+    - Restart sftpgo
+
+- name: Apply the changes before starting
+  ansible.builtin.meta: flush_handlers
+
+# --check で初めて導入する場合は、ユニットがまだないので起動しない
+- name: Start sftpgo.service
+  ansible.builtin.systemd_service:
+    name: sftpgo
+    enabled: true
+    state: started
+  when: not ansible_check_mode or sftpgo_unit_stat.stat.exists
+
+# ---- 検証 ----
+# --check で変更する予定の場合は、まだ反映されていないので検証しない
+- name: Verify SFTPGo
+  when: >-
+    not (ansible_check_mode and
+         (sftpgo_image_inspect.rc != 0 or sftpgo_users_file is changed or sftpgo_compose_file is changed or sftpgo_unit is changed))
+  block:
+    - name: Read the container
+      ansible.builtin.command: docker container inspect {{ sftpgo_container_name }}
+      register: sftpgo_inspect
+      changed_when: false
+      check_mode: false  # 読み取りのみ
+
+    - name: Set the container state
+      ansible.builtin.set_fact:
+        sftpgo_container: "{{ (sftpgo_inspect.stdout | from_json) | first }}"
+
+    # 公開するのは sftpgo_share_dir だけ（/mnt/data 全体や /mnt/share をマウントしていない）
+    - name: Fail unless the container runs with the expected mounts
+      ansible.builtin.assert:
+        that:
+          - sftpgo_container.State.Running
+          - sftpgo_container.Mounts | selectattr('Type', 'eq', 'bind') | map(attribute='Source') | sort ==
+            [sftpgo_share_dir, sftpgo_tmp_dir, sftpgo_dir ~ '/users.json'] | sort
+        fail_msg: >-
+          コンテナが起動していないか、bind mount が想定と異なる（Running: {{ sftpgo_container.State.Running }},
+          bind: {{ sftpgo_container.Mounts | selectattr('Type', 'eq', 'bind') | map(attribute='Source') | join(', ') }}）
+        quiet: true
+
+    # users.json に誤りがあっても SFTPGo は起動する（ユーザーが 1 人もいない状態になる）ので、ログで確認する
+    - name: Wait until SFTPGo has started
+      ansible.builtin.command: docker logs --since {{ sftpgo_container.State.StartedAt }} {{ sftpgo_container_name }}
+      register: sftpgo_logs
+      until: >-
+        'server listener registered' in sftpgo_logs.stdout ~ sftpgo_logs.stderr or
+        'data loading failed' in sftpgo_logs.stdout ~ sftpgo_logs.stderr
+      retries: 15
+      delay: 2
+      changed_when: false
+      check_mode: false  # 読み取りのみ
+
+    - name: Fail if SFTPGo could not load the users
+      ansible.builtin.assert:
+        that: "'data loading failed' not in sftpgo_logs.stdout ~ sftpgo_logs.stderr"
+        fail_msg: >-
+          SFTPGo が users.json を読み込めなかった。sftpgo_users（permissions など）を確認すること:
+          {{ (sftpgo_logs.stdout_lines + sftpgo_logs.stderr_lines) | select('search', 'error adding|data loading failed') | join(' ') }}
+        quiet: true
+
+    - name: Check the HTTP health endpoint
+      ansible.builtin.uri:
+        url: http://127.0.0.1:{{ sftpgo_http_port }}/healthz
+        return_content: true
+      register: sftpgo_healthz
+      failed_when: sftpgo_healthz.status != 200 or sftpgo_healthz.content | trim != 'ok'
+      retries: 5
+      delay: 2
+      until: sftpgo_healthz.status == 200
+      check_mode: false  # 読み取りのみ
+      when: sftpgo_http_port | int > 0

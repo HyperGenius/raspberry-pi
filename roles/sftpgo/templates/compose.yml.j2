@@ -1,0 +1,50 @@
+# {{ ansible_managed }}
+# sftpgo.service（systemd）から起動する。USB のマウントを待つため、直接 docker compose up しない
+name: sftpgo
+services:
+  sftpgo:
+    image: {{ sftpgo_image }}
+    container_name: {{ sftpgo_container_name }}
+    user: "{{ sftpgo_uid }}:{{ sftpgo_gid }}"
+    restart: unless-stopped
+    environment:
+      SFTPGO_LOG_LEVEL: {{ sftpgo_log_level }}
+      # ユーザーは users.json だけで定義する（DB を持たない。起動時に読み込む）
+      SFTPGO_DATA_PROVIDER__DRIVER: memory
+      SFTPGO_DATA_PROVIDER__NAME: {{ sftpgo_container_users_file }}
+      # アトミックアップロード: 同じディレクトリの一時ファイル（.sftpgo-upload.*）に書き、完了したらリネームする
+      SFTPGO_COMMON__UPLOAD_MODE: "1"
+      SFTPGO_HTTPD__BINDINGS__0__PORT: "{{ sftpgo_container_http_port if sftpgo_http_port | int > 0 else 0 }}"
+      # 管理画面は使わない（管理者を作らないため、有効だと初期設定画面から誰でも管理者を作れてしまう）
+      SFTPGO_HTTPD__BINDINGS__0__ENABLE_WEB_ADMIN: "false"
+      SFTPGO_WEBDAVD__BINDINGS__0__PORT: "{{ sftpgo_container_webdav_port if sftpgo_webdav_port | int > 0 else 0 }}"
+      SFTPGO_SFTPD__BINDINGS__0__PORT: "{{ sftpgo_container_sftp_port if sftpgo_sftp_port | int > 0 else 0 }}"
+{% if sftpgo_ports | length > 0 %}
+    ports:
+{% for port in sftpgo_ports %}
+      - "{{ port.host }}:{{ port.container }}"
+{% endfor %}
+{% endif %}
+    volumes:
+      # USB がマウントされていないときに SD カード上にディレクトリを作らないよう、create_host_path: false にする
+      - type: bind
+        source: {{ sftpgo_share_dir }}
+        target: {{ sftpgo_container_share_dir }}
+        bind:
+          create_host_path: false
+      # multipart のアップロードは /tmp に一時ファイルを作る（コンテナのレイヤー = SD カードに書かない）
+      - type: bind
+        source: {{ sftpgo_tmp_dir }}
+        target: /tmp
+        bind:
+          create_host_path: false
+      - type: bind
+        source: {{ sftpgo_dir }}/users.json
+        target: {{ sftpgo_container_users_file }}
+        read_only: true
+        bind:
+          create_host_path: false
+      # SFTP のホスト鍵など（Docker の volume = SD カードの p3）
+      - data:/var/lib/sftpgo
+volumes:
+  data:
