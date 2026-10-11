@@ -13,5 +13,14 @@
       }
     }{{ ',' if not loop.last else '' }}
 {% endfor %}
+  ],
+  "admins": [
+    {
+      "username": "admin",
+      "password": "disabled",
+      "status": 0,
+      "permissions": ["*"],
+      "description": "Placeholder (disabled). Without an admin, SFTPGo redirects the web client to the setup page"
+    }
   ]
 }

@@ -223,3 +223,13 @@
       until: sftpgo_healthz.status == 200
       check_mode: false  # 読み取りのみ
       when: sftpgo_http_port | int > 0
+
+    # 管理者が 1 人もいないと、Web クライアントは初期設定画面（管理画面を無効にしているため 404）にリダイレクトされる
+    - name: Check that the web client shows the login page
+      ansible.builtin.uri:
+        url: http://127.0.0.1:{{ sftpgo_http_port }}/web/client/login
+        follow_redirects: none
+      register: sftpgo_web_client
+      failed_when: sftpgo_web_client.status != 200
+      check_mode: false  # 読み取りのみ
+      when: sftpgo_http_port | int > 0
