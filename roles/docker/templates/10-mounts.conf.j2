@@ -1,0 +1,4 @@
+# {{ ansible_managed }}
+# {{ docker_data_root }}（SD カードの p3）のマウントが完了してから起動する
+[Unit]
+RequiresMountsFor={{ docker_data_root }}

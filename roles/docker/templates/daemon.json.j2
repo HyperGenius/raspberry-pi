@@ -1,0 +1,10 @@
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": {{ docker_log_max_size | to_json }},
+    "max-file": {{ docker_log_max_file | string | to_json }}
+  },
+  "features": {
+    "containerd-snapshotter": {{ docker_containerd_snapshotter | bool | to_json }}
+  }
+}

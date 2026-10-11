@@ -35,5 +35,8 @@
     # 既存の USB ストレージを UUID でマウントする（mkfs・chown はしない）
     - role: usb_storage
       tags: [usb_storage, storage]
+    # Docker を導入する（/var/lib/docker に p3 がマウントされていなければ何もせずに失敗する）
+    - role: docker
+      tags: [docker]
     - role: common
       tags: [common]
