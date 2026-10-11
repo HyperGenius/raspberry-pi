@@ -1,0 +1,18 @@
+---
+# パーティションを変更する SD カード（パーティションテーブルは MBR（msdos）であること）
+sd_partition_device: /dev/mmcblk0
+
+# p2（root）のサイズ。現在のサイズ以上のときだけ拡張する（縮小はしない）。1MiB 単位で指定する
+sd_partition_root_size: 14GiB
+# p2 がマウントされている場所（実行前に p2 が root であることを確認する）
+sd_partition_root_mount: /
+
+# p3（Docker 用、残り全部）
+sd_partition_docker_label: docker
+sd_partition_docker_mount: /var/lib/docker
+sd_partition_docker_opts: defaults,noatime
+# p3 を作るのに最低限必要な空き容量
+sd_partition_docker_min_size: 1GiB
+
+# 自動拡張（init=... resize）が残っていないことを確認するファイル
+sd_partition_cmdline: /boot/firmware/cmdline.txt

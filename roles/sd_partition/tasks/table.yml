@@ -1,0 +1,17 @@
+---
+# パーティションテーブルを読み取り、p1〜p3 の情報（バイト単位）を fact にする
+- name: Read the partition table of {{ sd_partition_device }}
+  community.general.parted:
+    device: "{{ sd_partition_device }}"
+    unit: B
+    state: info
+  register: sd_partition_table
+
+- name: Set facts for the partitions
+  ansible.builtin.set_fact:
+    sd_partition_label_type: "{{ sd_partition_table.disk.table }}"
+    sd_partition_numbers: "{{ sd_partition_table.partitions | map(attribute='num') | list }}"
+    sd_partition_disk_end: "{{ (sd_partition_table.disk.size | int) - 1 }}"
+    sd_partition_sector: "{{ sd_partition_table.disk.logical_block | int }}"
+    sd_partition_p2: "{{ sd_partition_table.partitions | selectattr('num', 'eq', 2) | first | default(none) }}"
+    sd_partition_p3: "{{ sd_partition_table.partitions | selectattr('num', 'eq', 3) | first | default(none) }}"

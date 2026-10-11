@@ -1,0 +1,204 @@
+---
+# 実行順序: 実行前チェック → p2 拡張 → p3 作成 →（カーネルに反映されなければ再起動）→ root の resize2fs → p3 の mkfs → マウント
+- name: Validate sd_partition settings
+  ansible.builtin.assert:
+    that:
+      - sd_partition_root_bytes | int > 0
+      - sd_partition_root_bytes | int % 1048576 == 0
+    fail_msg: "sd_partition_root_size は 1MiB 単位で指定すること（例: 14GiB）"
+    quiet: true
+
+# ---- 実行前チェック ----
+- name: Read {{ sd_partition_cmdline }}
+  ansible.builtin.slurp:
+    src: "{{ sd_partition_cmdline }}"
+  register: sd_partition_cmdline_content
+
+- name: Fail if automatic root expansion is still enabled
+  ansible.builtin.assert:
+    that: "'resize' not in (sd_partition_cmdline_content.content | b64decode)"
+    fail_msg: >-
+      {{ sd_partition_cmdline }} に resize が含まれている（起動時に root が自動拡張される）。
+      playbooks/prepare_sd.yml で準備した SD カードか確認すること
+    quiet: true
+
+- name: Find the partition mounted on {{ sd_partition_root_mount }}
+  ansible.builtin.command: findmnt -n -o SOURCE --mountpoint {{ sd_partition_root_mount }}
+  register: sd_partition_root_source
+  changed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Fail unless p2 is the root partition
+  ansible.builtin.assert:
+    that: sd_partition_root_source.stdout == sd_partition_root_part
+    fail_msg: "{{ sd_partition_root_mount }} が {{ sd_partition_root_part }} ではない（{{ sd_partition_root_source.stdout }}）"
+    quiet: true
+
+- name: Read the partition table
+  ansible.builtin.include_tasks: table.yml
+
+- name: Fail unless the partition table is MBR with p1 and p2 (and optionally p3)
+  ansible.builtin.assert:
+    that:
+      - sd_partition_label_type == 'msdos'
+      - 1 in sd_partition_numbers
+      - 2 in sd_partition_numbers
+      - sd_partition_numbers | difference([1, 2, 3]) | length == 0
+    fail_msg: "MBR（msdos）で p1・p2（・p3）だけの構成を前提にしている（table: {{ sd_partition_label_type }}, partitions: {{ sd_partition_numbers }}）"
+    quiet: true
+
+# 初回起動時に root が自動拡張されると、p2 がディスクの最後まで広がって空き領域がなくなる
+- name: Fail if p2 was expanded to the end of the disk
+  ansible.builtin.assert:
+    that: >-
+      sd_partition_p3 is not none
+      or sd_partition_disk_end | int - sd_partition_p2.end | int >= 1048576
+    fail_msg: >-
+      p2 の後ろに空き領域がなく、p3 もない。初回起動時に root が自動拡張された可能性がある。
+      playbooks/prepare_sd.yml で SD カードを作り直すこと
+    quiet: true
+
+- name: Set the planned layout
+  ansible.builtin.set_fact:
+    sd_partition_grow_root: "{{ sd_partition_p2.size | int < sd_partition_root_bytes | int }}"
+    # 拡張後の p2 の終端（縮小はしないので、現在のサイズの方が大きければそのまま）
+    sd_partition_root_end: "{{ [sd_partition_p2.end | int, sd_partition_p2.begin | int + sd_partition_root_bytes | int - 1] | max }}"
+
+- name: Fail unless p2 can grow and leave room for p3
+  ansible.builtin.assert:
+    that: >-
+      (sd_partition_p3 is none and sd_partition_disk_end | int - sd_partition_root_end | int >= sd_partition_docker_min_bytes | int)
+      or (sd_partition_p3 is not none and sd_partition_root_end | int < sd_partition_p3.begin | int)
+    fail_msg: >-
+      p2 を {{ sd_partition_root_size }} にすると
+      {{ 'p3 と重なる' if sd_partition_p3 is not none else 'p3 用の空き（' ~ sd_partition_docker_min_size ~ ' 以上）が残らない' }}
+    quiet: true
+
+# 既に Docker のデータがある場所の上にマウントして隠してしまわないようにする
+- name: Find the device mounted on {{ sd_partition_docker_mount }}
+  ansible.builtin.command: findmnt -n -o SOURCE --mountpoint {{ sd_partition_docker_mount }}
+  register: sd_partition_docker_source
+  changed_when: false
+  failed_when: sd_partition_docker_source.rc not in [0, 1]
+  check_mode: false  # 読み取りのみ
+
+- name: List files in {{ sd_partition_docker_mount }}
+  ansible.builtin.command: ls -A {{ sd_partition_docker_mount }}
+  register: sd_partition_docker_files
+  changed_when: false
+  failed_when: false  # ディレクトリがなければ空とみなす
+  check_mode: false  # 読み取りのみ
+  when: sd_partition_docker_source.rc != 0
+
+- name: Fail if {{ sd_partition_docker_mount }} is in use
+  ansible.builtin.assert:
+    that: >-
+      (sd_partition_docker_source.rc == 0 and sd_partition_docker_source.stdout == sd_partition_docker_part)
+      or (sd_partition_docker_source.rc != 0 and sd_partition_docker_files.stdout == '')
+    fail_msg: >-
+      {{ sd_partition_docker_mount }} に
+      {{ sd_partition_docker_source.stdout ~ ' がマウントされている' if sd_partition_docker_source.rc == 0 else '既にデータがある' }}。
+      Docker を導入する前に実行すること
+    quiet: true
+
+- name: Stop here in check mode if the partition table would change
+  when: ansible_check_mode and (sd_partition_grow_root or sd_partition_p3 is none)
+  block:
+    - name: Show the planned changes
+      ansible.builtin.debug:
+        msg: >-
+          p2: {{ sd_partition_p2.size | int | human_readable }} → {{ sd_partition_root_size if sd_partition_grow_root else '変更なし' }}
+          / p3: {{ '残り全部で作成' if sd_partition_p3 is none else '作成済み' }}
+
+    - name: End the role (the following tasks need the new partitions)
+      ansible.builtin.meta: end_role
+
+# ---- p2 の拡張 ----
+# parted -s は使用中（マウント中）のパーティションを変更できない（"is being used" で失敗する）ため、
+# 開始位置を変えずに sfdisk でサイズだけ書き換え、partx でカーネルに伝える
+- name: Grow p2 to {{ sd_partition_root_size }}
+  when: sd_partition_grow_root
+  block:
+    - name: Resize p2 in the partition table
+      ansible.builtin.command:
+        argv:
+          - sfdisk
+          - --no-reread
+          - --no-tell-kernel
+          - --wipe=never
+          - --wipe-partitions=never
+          - -N
+          - "2"
+          - "{{ sd_partition_device }}"
+        stdin: ",{{ sd_partition_root_bytes | int // sd_partition_sector | int }}"
+      changed_when: true
+
+    - name: Tell the kernel the new size of p2
+      ansible.builtin.command: partx -u --nr 2 {{ sd_partition_device }}
+      changed_when: false
+      failed_when: false  # 反映されなければ、後で再起動する
+
+    - name: Re-read the partition table
+      ansible.builtin.include_tasks: table.yml
+
+    - name: Check that p2 has the new size
+      ansible.builtin.assert:
+        that: sd_partition_p2.size | int == sd_partition_root_bytes | int
+        fail_msg: "p2 のサイズが {{ sd_partition_p2.size }} バイトになっている（期待値 {{ sd_partition_root_bytes }}）"
+        quiet: true
+
+# ---- p3 の作成 ----
+- name: Create p3 with the rest of the disk
+  community.general.parted:
+    device: "{{ sd_partition_device }}"
+    number: 3
+    part_type: primary
+    part_start: "{{ sd_partition_p2.end | int + 1 }}B"
+    part_end: 100%
+    unit: B
+    state: present
+
+# ---- カーネルへの反映（されていなければ再起動を1回挟む）----
+- name: Check that the kernel knows the new partitions
+  ansible.builtin.include_tasks: kernel.yml
+
+- name: Reboot so that the kernel reads the new partition table
+  ansible.builtin.reboot:
+    msg: Rebooting to reload the partition table (sd_partition)
+  when: not sd_partition_kernel_ok
+
+- name: Check the kernel again after the reboot
+  when: not sd_partition_kernel_ok
+  block:
+    - name: Check that the kernel knows the new partitions
+      ansible.builtin.include_tasks: kernel.yml
+
+    - name: Fail if the kernel still does not know the new partitions
+      ansible.builtin.assert:
+        that: sd_partition_kernel_ok
+        fail_msg: 再起動後もカーネルに新しいパーティション（p2 のサイズ、p3）が反映されていない
+        quiet: true
+
+# ---- root の拡張（オンライン）----
+- name: Grow the root filesystem to fill p2
+  ansible.builtin.command: resize2fs {{ sd_partition_root_part }}
+  register: sd_partition_resize2fs
+  changed_when: "'Nothing to do' not in sd_partition_resize2fs.stdout + sd_partition_resize2fs.stderr"
+
+# ---- p3 のフォーマットとマウント ----
+# 既にファイルシステムがあれば何もしない（force は使わない）
+- name: Create an ext4 filesystem on p3
+  community.general.filesystem:
+    fstype: ext4
+    dev: "{{ sd_partition_docker_part }}"
+    opts: -L {{ sd_partition_docker_label }}
+
+- name: Mount p3 on {{ sd_partition_docker_mount }}
+  ansible.posix.mount:
+    path: "{{ sd_partition_docker_mount }}"
+    src: LABEL={{ sd_partition_docker_label }}
+    fstype: ext4
+    opts: "{{ sd_partition_docker_opts }}"
+    dump: "0"
+    passno: "2"
+    state: mounted
