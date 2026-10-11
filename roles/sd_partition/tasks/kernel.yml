@@ -1,0 +1,16 @@
+---
+# パーティションテーブルの内容（p2 のサイズ、p3 の有無）がカーネルに反映されているかを確認する
+- name: Read the size of p2 known to the kernel
+  ansible.builtin.command: blockdev --getsize64 {{ sd_partition_root_part }}
+  register: sd_partition_kernel_p2
+  changed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Check whether the kernel knows p3
+  ansible.builtin.stat:
+    path: /sys/class/block/{{ sd_partition_docker_part | basename }}
+  register: sd_partition_kernel_p3
+
+- name: Set whether the kernel is up to date
+  ansible.builtin.set_fact:
+    sd_partition_kernel_ok: "{{ sd_partition_kernel_p2.stdout | int == sd_partition_p2.size | int and sd_partition_kernel_p3.stat.exists }}"

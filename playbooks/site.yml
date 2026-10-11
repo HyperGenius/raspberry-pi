@@ -29,5 +29,8 @@
     # ネットワークを変更する（実機専用。Molecule では --skip-tags hardware で除外する）
     - role: static_ip
       tags: [static_ip, network, hardware]
+    # SD カードのパーティションを変更する（実機専用。Docker の導入より前に実行する）
+    - role: sd_partition
+      tags: [sd_partition, storage, hardware]
     - role: common
       tags: [common]

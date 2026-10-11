@@ -1,0 +1,9 @@
+---
+# /dev/mmcblk0 → /dev/mmcblk0p2、/dev/sda → /dev/sda2
+sd_partition_part_prefix: "{{ sd_partition_device ~ ('p' if sd_partition_device[-1] in '0123456789' else '') }}"
+sd_partition_root_part: "{{ sd_partition_part_prefix }}2"
+sd_partition_docker_part: "{{ sd_partition_part_prefix }}3"
+
+# human_to_bytes は GiB を解釈できないため GB（1024 単位）に置き換える
+sd_partition_root_bytes: "{{ sd_partition_root_size | regex_replace('iB$', 'B') | human_to_bytes }}"
+sd_partition_docker_min_bytes: "{{ sd_partition_docker_min_size | regex_replace('iB$', 'B') | human_to_bytes }}"

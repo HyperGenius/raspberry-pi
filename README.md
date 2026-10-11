@@ -25,6 +25,8 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
 │   └── prepare_sd.yml        # 初回起動前に Mac 上で bootfs を準備する
 └── roles/
     ├── bootfs/               # bootfs の user-data / network-config / meta-data / cmdline.txt
+    ├── static_ip/            # 固定IP
+    ├── sd_partition/         # SD カードのパーティション構成（root の拡張と Docker 用領域）
     └── common/               # 全台共通の初期設定
 ```
 
@@ -86,6 +88,32 @@ static_ip_interfaces:
 - `/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg` を置き、cloud-init がネットワーク設定を作り直さないようにする
 - 実機専用のため `hardware` タグを付けている（Molecule では `--skip-tags hardware` で除外する）。単独で実行する場合は `--tags static_ip`
 - 開発中はモニタとキーボードをつなぎ、ロールバックに失敗した場合に備える
+
+## パーティション構成（roles/sd_partition）
+
+初回起動時の root の自動拡張を無効にしているため、root（p2）はイメージ由来の最小サイズで起動する。この role で p2 を指定サイズまで拡張し、残りを Docker 用（p3）にする。
+
+| パーティション | サイズ | FS | ラベル | マウント先 |
+|---|---|---|---|---|
+| p1 | Imager の初期値（変更しない） | vfat | bootfs | `/boot/firmware` |
+| p2 | `sd_partition_root_size`（既定 `14GiB`） | ext4 | rootfs | `/` |
+| p3 | 残り全部 | ext4 | `docker` | `/var/lib/docker`（`defaults,noatime`、fstab に登録） |
+
+- 実行前に次を確認し、満たさなければ何も変更せずに失敗する
+  - `/boot/firmware/cmdline.txt` に `resize` が含まれていない
+  - パーティションテーブルが MBR（msdos）で、p2 が `/` にマウントされている
+  - p2 の後ろに空き領域がある、または p3 が既にある（ない場合は初回起動時に root が自動拡張されたとみなす。SD カードを作り直す）
+  - `/var/lib/docker` が空、または既に p3 がマウントされている
+- p2 は現在のサイズが指定サイズより小さいときだけ拡張する（縮小はしない）。マウント中のパーティションは `parted -s` では変更できないため、`sfdisk -N 2` で開始位置を変えずにサイズだけ書き換え、`partx` でカーネルに伝えてから `resize2fs` でオンライン拡張する
+- p3 のフォーマットは、ファイルシステムがない場合だけ行う（`force` は使わない）
+- 新しいパーティションがカーネルに反映されない場合は、1回だけ再起動する
+- `--check` では、パーティションテーブルを変更する場合は予定（p2 のサイズと p3 の作成）を表示してそこで止まる
+- 実機専用のため `hardware` タグを付けている。単独で実行する場合は `--tags sd_partition`。Docker の導入より前に実行すること
+
+```sh
+ansible-playbook playbooks/site.yml --limit rpi-01 --tags sd_partition --check   # 予定を確認
+ansible-playbook playbooks/site.yml --limit rpi-01 --tags sd_partition
+```
 
 ## Raspberry Pi を追加する
 
