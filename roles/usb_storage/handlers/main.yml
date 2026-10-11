@@ -1,0 +1,5 @@
+---
+# fstab の変更を systemd（systemd-fstab-generator が作る .mount ユニット）に反映する
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true

@@ -1,0 +1,23 @@
+---
+# マウントする USB ストレージの一覧（値は host_vars で定義する）。UUID は lsblk -f で確認する
+#   - uuid: 96efbf0e-c2e7-4007-b81d-1177c5f73fdc
+#     fstype: ext4        # ext4 / ntfs
+#     path: /mnt/data
+#     opts: ...           # 省略時は usb_storage_ext4_opts / usb_storage_ntfs_opts
+#     uid / gid / umask   # NTFS のみ。省略時は usb_storage_ntfs_uid / _gid / _umask
+usb_storage_devices: []
+
+# ext4 のマウントオプション
+usb_storage_ext4_opts: defaults,noatime
+
+# NTFS のマウントオプション。NTFS は Linux の所有者・パーミッションを持たないため、uid / gid / umask で決める
+usb_storage_ntfs_opts: defaults,noatime
+usb_storage_ntfs_uid: 1000
+usb_storage_ntfs_gid: 1000
+usb_storage_ntfs_umask: "022"
+
+# 全デバイスに付けるオプション（USB が未接続でも起動が止まらないようにする）
+usb_storage_boot_opts: nofail,x-systemd.device-timeout=10s
+
+# マウント後に書き込めることを確認するユーザー
+usb_storage_write_user: "{{ ansible_user }}"

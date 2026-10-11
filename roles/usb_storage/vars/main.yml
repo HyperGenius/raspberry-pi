@@ -1,0 +1,5 @@
+---
+# NTFS のマウントに失敗したとき・読み取り専用になったときの対処
+usb_storage_ntfs_hint: >-
+  NTFS の dirty フラグ（Windows で安全に取り外さなかった、高速スタートアップで休止状態のままなど）が原因の可能性がある。Windows
+  に接続して chkdsk /f を実行するか、Pi で sudo ntfsfix -d {{ usb_storage_blkdev.stdout }}（ntfs-3g パッケージ）を実行してから再実行すること

@@ -9,3 +9,12 @@ static_ip_interfaces:
     gateway: 192.168.10.1
     dns:
       - 192.168.10.1
+
+# USB ストレージ（roles/usb_storage）。既存のデータをそのまま使う（mkfs・chown はしない）
+usb_storage_devices:
+  - uuid: 96efbf0e-c2e7-4007-b81d-1177c5f73fdc  # sda1
+    fstype: ext4
+    path: /mnt/data
+  - uuid: 226667176666EACD  # sdb1。Docker の bind mount 先には使わない
+    fstype: ntfs
+    path: /mnt/share
