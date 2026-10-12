@@ -5,7 +5,7 @@
       "username": {{ user.name | to_json }},
       "password": {{ user.password_hash | to_json }},
       "status": 1,
-      "home_dir": {{ sftpgo_container_share_dir | to_json }},
+      "home_dir": {{ (sftpgo_container_empty_dir if user.root | default('share_dir') == 'empty' else sftpgo_container_share_dir) | to_json }},
       "permissions": {{ user.permissions | to_json }},
       "virtual_folders": [
 {% for vpath, name in (user.virtual_folders | default({})).items() %}

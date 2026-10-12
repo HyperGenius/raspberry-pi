@@ -290,21 +290,22 @@ journalctl -b -o short-monotonic -u systemd-timesyncd -u systemd-time-wait-sync 
 | 変数 | 既定 | 内容 |
 |---|---|---|
 | `sftpgo_image` | `drakkan/sftpgo:v2.7.6` | イメージ（バージョンを固定する） |
-| `sftpgo_share_dir` | `/mnt/data/encoded` | 公開するディレクトリ（USB の ext4 上）。全ユーザーの `/` になる |
-| `sftpgo_folders` | `{}` | 追加で公開するディレクトリ（`名前: ホストのパス`。USB の ext4 上）。ユーザーの `virtual_folders` で見せる |
+| `sftpgo_share_dir` | `/mnt/data/encoded` | 公開するディレクトリ（USB の ext4 上）。`root: empty` にしたユーザー以外の `/` になる |
+| `sftpgo_folders` | `{}` | 追加で公開するディレクトリ（`名前: ホストのパス`。USB の ext4 上。`sftpgo_share_dir` と同じパスでもよい）。ユーザーの `virtual_folders` で見せる |
 | `sftpgo_tmp_dir` | `/mnt/data/.sftpgo-tmp` | 一時ファイルの置き場所（USB 上、`sftpgo_share_dir` の外） |
 | `sftpgo_uid` / `sftpgo_gid` | `1000` / `1000` | コンテナの UID / GID（アップロードしたファイルの所有者） |
 | `sftpgo_http_port` | `8080` | REST API と Web クライアント（`0` で無効） |
 | `sftpgo_webdav_port` | `10080` | WebDAV（`0` で無効） |
 | `sftpgo_sftp_port` | `0` | SFTP（`0` で無効。22 は sshd が使う） |
 | `sftpgo_allowed_networks` | `[]` | 接続を許可するネットワーク（CIDR）。空なら制限しない |
-| `sftpgo_users` | `[]` | ユーザーの一覧（`name` / `password_hash` / `permissions` / `virtual_folders` / `allowed_networks`） |
+| `sftpgo_users` | `[]` | ユーザーの一覧（`name` / `password_hash` / `permissions` / `virtual_folders` / `root` / `allowed_networks`） |
 
 ユーザーは `host_vars/<host>.yml` に書き、パスワードのハッシュは vault に置く。
 
 ```yaml
 sftpgo_allowed_networks: [192.168.10.0/24]
 sftpgo_folders:
+  data: /mnt/data/encoded
   share: /mnt/share
 sftpgo_users:
   - name: client
@@ -313,15 +314,19 @@ sftpgo_users:
       /: [list, download, upload, create_dirs]
   - name: genius
     password_hash: "{{ vault_sftpgo_genius_password_hash }}"
+    root: empty           # / を空にして、virtual_folders（data と share）だけを表示する
     permissions:
-      /: [list, download]
+      /: [list]
+      /data: [list, download]
       /share: ["*"]       # virtual_folders の仮想パスの権限は必ず書く
     virtual_folders:      # 仮想パス: sftpgo_folders の名前
+      /data: data
       /share: share
 ```
 
 - 権限は `list`（一覧）、`download`、`upload`（新規のみ）、`overwrite`（上書き）、`delete`、`rename`、`create_dirs` など。`"*"` は全権限。`/sub` のようにパスごとに変えられる
 - `sftpgo_folders` のディレクトリは、`virtual_folders` に書いたユーザーにだけ見える（SFTPGo の virtual folders）。仮想パスは `/share` のように `/` の直下にする。仮想パスの権限を `permissions` に書かないと SFTPGo は `/` の権限を引き継ぐため、書いていなければ失敗させる
+- `root` は `share_dir`（既定。`/` が `sftpgo_share_dir`）か `empty`。`empty` の `/` はコンテナ内の tmpfs（root の所有・`0755`）で、virtual folders だけが表示される。`/` には書き込めない（SD カードにも書かない）
 - ユーザーは `users.json` だけで定義する（SFTPGo の memory プロバイダ。DB を持たない）。`sftpgo_users` から消したユーザーはログインできなくなる。Web 管理画面は無効にしている。管理者は無効（status 0）なものを 1 人だけ置く（管理者が 1 人もいないと、Web クライアントが初期設定画面にリダイレクトされて使えないため）
 - Web クライアントでの共有リンク（ログインなしでアクセスできる）、パスワードの変更、二要素認証などは無効にしている（再起動で消えるため）
 - アップロードはアトミック（同じディレクトリの `.sftpgo-upload.*` に書き、完了したらリネームする）。途中のファイルは元の名前では現れない。コンテナが強制終了した場合などに `.sftpgo-upload.*` が残ることがある
@@ -360,7 +365,7 @@ curl -H "Authorization: Bearer $T" --data-binary @file.mp4 "$B/api/v2/user/files
 - API の仕様: `http://192.168.10.55:8080/openapi/`（Swagger UI）
 - ブラウザ: `http://192.168.10.55:8080/`（Web クライアント）
 - WebDAV: `http://192.168.10.55:10080/`（Finder の「サーバへ接続」など）
-- `/mnt/share` は `genius` ユーザーで `/share` に見える。Windows のエクスプローラーは HTTP の WebDAV で Basic 認証を使わない（既定の設定）ため、WinSCP（プロトコルに WebDAV を選ぶ）や rclone、ブラウザの Web クライアントを使う
+- `genius` ユーザーでは、`/` に `data`（`/mnt/data/encoded`）と `share`（`/mnt/share`）が表示される。Windows のエクスプローラーは HTTP の WebDAV で Basic 認証を使わない（既定の設定）ため、WinSCP（プロトコルに WebDAV を選ぶ）や rclone、ブラウザの Web クライアントを使う
 
 運用規約:
 
