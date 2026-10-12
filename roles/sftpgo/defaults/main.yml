@@ -2,7 +2,7 @@
 # SFTPGo のイメージ（バージョンを固定する。上げるときは https://github.com/drakkan/sftpgo/releases を確認する）
 sftpgo_image: drakkan/sftpgo:v2.7.6
 
-# 公開するディレクトリ（USB の ext4 上にあること。/mnt/share の NTFS は不可）
+# 公開するディレクトリ（USB の ext4 上にあること。NTFS は不可）
 sftpgo_share_dir: /mnt/data/encoded
 
 # アップロード中の一時ファイル（multipart のアップロード）の置き場所。SD カードに書かないよう USB 上にする。

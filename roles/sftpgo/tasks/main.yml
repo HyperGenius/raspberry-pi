@@ -63,7 +63,7 @@
     that:
       - item.stdout.split() | first != '/'
       - item.stdout.split() | last == 'ext4'
-    fail_msg: "{{ item.item }} が USB の ext4 上にない（{{ item.stdout | regex_replace('\\s+', ' ') }}）。SD カードや NTFS（/mnt/share）は使わないこと"
+    fail_msg: "{{ item.item }} が USB の ext4 上にない（{{ item.stdout | regex_replace('\\s+', ' ') }}）。SD カードや NTFS は使わないこと"
     quiet: true
   loop: "{{ sftpgo_findmnt.results }}"
   loop_control:
@@ -180,7 +180,7 @@
       ansible.builtin.set_fact:
         sftpgo_container: "{{ (sftpgo_inspect.stdout | from_json) | first }}"
 
-    # 公開するのは sftpgo_share_dir だけ（/mnt/data 全体や /mnt/share をマウントしていない）
+    # 公開するのは sftpgo_share_dir だけ（USB の全体はマウントしていない）
     - name: Fail unless the container runs with the expected mounts
       ansible.builtin.assert:
         that:

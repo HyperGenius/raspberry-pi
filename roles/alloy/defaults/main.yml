@@ -35,7 +35,7 @@ alloy_filesystem_mount_points:
   - /                # SD カードの p2（root）
   - /var/lib/docker  # SD カードの p3（Docker）
   - /mnt/data        # USB（ext4）
-  - /mnt/share       # USB（NTFS）
+  - /mnt/share       # USB（ext4）
 
 # docker compose を起動する systemd の unit（sftpgo.service など）。unit の状態（systemd コレクタ）と、compose ファイルに
 # あるコンテナの状態（compose-metrics.timer → textfile コレクタ）を送る。空なら送らない（timer も削除する）。

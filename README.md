@@ -173,8 +173,8 @@ usb_storage_devices:
   - uuid: 96efbf0e-c2e7-4007-b81d-1177c5f73fdc
     fstype: ext4
     path: /mnt/data
-  - uuid: 226667176666EACD
-    fstype: ntfs
+  - uuid: a6c04fd5-09d5-4bb7-9d6b-b856611129da
+    fstype: ext4
     path: /mnt/share
 ```
 
@@ -194,8 +194,8 @@ usb_storage_devices:
 
 運用規約:
 
-- NTFS（`/mnt/share`）は Docker の bind mount 先に使用しない（Linux の所有者・パーミッションを保持できないため）
-- ext4（`/mnt/data`）の既存ファイルの UID が Pi 上のユーザーと一致しない場合（`[要確認]` が表示される）は、所有者を変更するかどうかを手作業で判断する。role では chown しない
+- NTFS は Docker の bind mount 先に使用しない（Linux の所有者・パーミッションを保持できないため）。Pi 専用のディスクは ext4 にする（下記）
+- ext4 の既存ファイルの UID が Pi 上のユーザーと一致しない場合（`[要確認]` が表示される）は、所有者を変更するかどうかを手作業で判断する。role では chown しない
 
 ```sh
 ansible-playbook playbooks/site.yml --limit rpi-01 --tags usb_storage
@@ -352,7 +352,7 @@ curl -H "Authorization: Bearer $T" --data-binary @file.mp4 "$B/api/v2/user/files
 
 運用規約:
 
-- 公開するディレクトリは `/mnt/data` 配下の必要なものに限定する。NTFS（`/mnt/share`）は対象外とする
+- 公開するディレクトリは USB の ext4 配下の必要なものに限定する
 - 認証を必須にする（匿名アクセスを許可しない）。`sftpgo_allowed_networks` で LAN に限定する
 - 削除・上書きの権限（`delete` / `overwrite` / `rename`）は必要なユーザーにだけ与える。API からの削除は取り消せない
 - Pi 上の処理（エンコードなど）と API が同じディレクトリに同時に書き込む場合は、書き込み先を分ける（例: API は `uploads/` に書く）
@@ -508,7 +508,7 @@ ssh -o HostKeyAlias=rpi-01 -i ~/.ssh/id_ed25519_rp4 -L 32400:127.0.0.1:32400 gen
 
 - **リモートアクセス・Relay を有効にしない**（LAN の外に公開しない）。画面で有効にしても、次の Ansible の実行で無効に戻る
 - ライブラリは読み取り専用でマウントする。Plex から動画を削除・変更しない（「メディアの削除を許可」は使えない）。最適化（Optimize）・同期も Pi の CPU では使わない
-- ライブラリにするディレクトリは `/mnt/data` 配下の必要なものに限定する。NTFS（`/mnt/share`）は対象外とする
+- ライブラリにするディレクトリは USB の ext4 配下の必要なものに限定する
 - Plex のデータ（`/mnt/data/plex`）の容量を監視する（ライブラリが大きくなると数 GB になる）
 
 ## 監視（roles/alloy）
