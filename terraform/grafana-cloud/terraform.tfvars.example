@@ -1,0 +1,17 @@
+# terraform.tfvars の雛形（cp terraform.tfvars.example terraform.tfvars で作る。terraform.tfvars は Git 管理外）
+# TF_VAR_grafana_url などの環境変数で渡してもよい
+
+# 秘密情報（README の「事前準備」を参照）
+# grafana_url はブラウザで Grafana を開く URL。Alloy の送信先（https://prometheus-prod-...grafana.net）ではない
+grafana_url       = "https://<stack>.grafana.net"
+grafana_auth      = "glsa_..."
+slack_webhook_url = "https://hooks.slack.com/services/XXX/YYY/ZZZ"
+
+# 以下は既定値と異なる場合だけ設定する
+# prometheus_data_source_name = "grafanacloud-<stack>-prom"
+# instances                   = ["rpi-01"]
+# repeat_interval             = "4h"
+
+# 通知の確認では、しきい値を一時的に変えて apply する（例: CPU の温度を 30℃、継続時間を 0s）
+# cpu_temp_celsius = 30
+# cpu_temp_for     = "0s"

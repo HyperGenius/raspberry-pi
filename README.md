@@ -1,6 +1,6 @@
 # raspberry-pi
 
-Raspberry Pi のプロビジョニング用 IaC（Ansible）。
+Raspberry Pi のプロビジョニング用 IaC（Ansible）と、監視（Grafana Cloud）の設定（Terraform）。
 
 ## 構成
 
@@ -23,18 +23,28 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）。
 ├── playbooks/
 │   ├── site.yml              # エントリポイント
 │   └── prepare_sd.yml        # 初回起動前に Mac 上で bootfs を準備する
-└── roles/
-    ├── bootfs/               # bootfs の user-data / network-config / meta-data / cmdline.txt
-    ├── static_ip/            # 固定IP
-    ├── sd_partition/         # SD カードのパーティション構成（root の拡張と Docker 用領域）
-    ├── sd_longevity/         # SD カードの延命（swap を zram のみに、journald の揮発化、root の noatime）
-    ├── usb_storage/          # 既存の USB ストレージの自動マウント
-    ├── docker/               # Docker（データは SD カードの p3、ログのローテーション）
-    ├── sftpgo/               # SFTPGo で USB のディレクトリを LAN に公開する（REST API / WebDAV / Web クライアント）
-    ├── epgstation/           # Mirakurun + EPGStation でテレビ番組を録画する（PX-S1UD、ハードウェアエンコード）
-    ├── plex/                 # Plex Media Server で USB のディレクトリを LAN に配信する
-    ├── alloy/                # Grafana Alloy でメトリクス（容量・温度・CPU・メモリ）を Grafana Cloud に送る
-    └── common/               # 全台共通の初期設定
+├── roles/
+│   ├── bootfs/               # bootfs の user-data / network-config / meta-data / cmdline.txt
+│   ├── static_ip/            # 固定IP
+│   ├── sd_partition/         # SD カードのパーティション構成（root の拡張と Docker 用領域）
+│   ├── sd_longevity/         # SD カードの延命（swap を zram のみに、journald の揮発化、root の noatime）
+│   ├── usb_storage/          # 既存の USB ストレージの自動マウント
+│   ├── docker/               # Docker（データは SD カードの p3、ログのローテーション）
+│   ├── sftpgo/               # SFTPGo で USB のディレクトリを LAN に公開する（REST API / WebDAV / Web クライアント）
+│   ├── epgstation/           # Mirakurun + EPGStation でテレビ番組を録画する（PX-S1UD、ハードウェアエンコード）
+│   ├── plex/                 # Plex Media Server で USB のディレクトリを LAN に配信する
+│   ├── alloy/                # Grafana Alloy でメトリクス（容量・温度・CPU・メモリ）を Grafana Cloud に送る
+│   └── common/               # 全台共通の初期設定
+└── terraform/
+    └── grafana-cloud/        # Grafana Cloud のダッシュボード・アラート・Slack への通知（Terraform）
+        ├── versions.tf       # Terraform・Grafana プロバイダのバージョン（.terraform.lock.hcl もコミットする）
+        ├── variables.tf      # 認証・秘密情報・アラートのしきい値と継続時間
+        ├── terraform.tfvars.example
+        ├── dashboard.tf      # フォルダ・ダッシュボード・データソースの参照
+        ├── dashboards/
+        │   └── raspberry-pi.json.tftpl
+        ├── notification.tf   # Slack の通知先・通知ポリシー
+        └── alerts.tf         # アラートルール
 ```
 
 ## SD カードを準備する（初回起動前）
@@ -455,7 +465,7 @@ ssh -o HostKeyAlias=rpi-01 -i ~/.ssh/id_ed25519_rp4 -L 32400:127.0.0.1:32400 gen
 
 ## 監視（roles/alloy）
 
-[Grafana Alloy](https://grafana.com/docs/alloy/latest/) をホストに apt で導入し、ストレージの容量・CPU の温度・CPU・メモリの使用率を Grafana Cloud（無料枠）の Prometheus に送る。`monitoring` グループのホスト（`hosts.yml`）だけに適用する。ダッシュボード・アラート（Slack への通知）は Grafana Cloud 側で管理する（#22）。
+[Grafana Alloy](https://grafana.com/docs/alloy/latest/) をホストに apt で導入し、ストレージの容量・CPU の温度・CPU・メモリの使用率を Grafana Cloud（無料枠）の Prometheus に送る。`monitoring` グループのホスト（`hosts.yml`）だけに適用する。ダッシュボード・アラート（Slack への通知）は Terraform で管理する（「ダッシュボード・アラート（terraform/grafana-cloud）」を参照）。
 
 | 構成 | 内容 |
 |---|---|
@@ -511,9 +521,85 @@ ansible-playbook playbooks/site.yml --limit rpi-01 --tags alloy --ask-vault-pass
 
 運用規約:
 
-- Grafana Cloud のトークンは `metrics:write` だけにする（読み取りや管理の権限を付けない）。Terraform（#22）のトークンとは分ける
+- Grafana Cloud のトークンは `metrics:write` だけにする（読み取りや管理の権限を付けない）。Terraform（terraform/grafana-cloud）のトークンとは分ける
 - 容量を送るマウント先を増やすときは `alloy_filesystem_mount_points` に追加する（絞り込みを外して全部送らない）
 - アプリのログの収集はこの role の対象外（別 Issue で扱う）
+
+## ダッシュボード・アラート（terraform/grafana-cloud）
+
+roles/alloy が送るメトリクスのダッシュボードとアラートを、Grafana Cloud に [Terraform の Grafana プロバイダ](https://registry.terraform.io/providers/grafana/grafana/latest/docs)で作る。容量不足・高温・メモリ不足・低電圧・Pi の停止を Slack に通知する。Ansible の `grafana.grafana` コレクションにはアラートルールのモジュールがないため、Terraform を使う（`terraform plan` で差分を確認でき、コードから消したリソースは Grafana Cloud からも消える）。
+
+| リソース | 内容 |
+|---|---|
+| `grafana_folder.raspberry_pi` | フォルダ「Raspberry Pi」（ダッシュボードとアラートルールを置く） |
+| `grafana_dashboard.raspberry_pi` | ダッシュボード「Raspberry Pi」（`dashboards/raspberry-pi.json.tftpl`） |
+| `grafana_contact_point.slack` | Slack の通知先（Incoming Webhook） |
+| `grafana_notification_policy.root` | 通知ポリシー（すべてのアラートを Slack に送る。スタックに 1 つだけ） |
+| `grafana_rule_group.raspberry_pi` | アラートルール（1 分ごとに評価する） |
+| `data.grafana_data_source.prometheus` | Grafana Cloud の Prometheus（スタックに最初からある。名前で参照し、UID は直書きしない） |
+
+ダッシュボード（`instance` を変数にしていて、ホストを切り替えられる）:
+
+- CPU 使用率・メモリ使用率・CPU の温度（現在の値のゲージと推移）
+- 低電圧（表示している期間に `rpi_volt` の警告があったか）
+- ストレージ（`/`・`/var/lib/docker`・`/mnt/data`・`/mnt/share`）の使用率・空き容量・空き容量の推移
+- ゲージの赤はアラートのしきい値（変数）に合わせる
+
+アラートルール（しきい値・継続時間は変数。Slack の通知文には summary のホスト名・マウント先・現在の値が入る）:
+
+| ルール | 条件（既定） | 変数 |
+|---|---|---|
+| 空き容量の不足 | 空き容量（`avail / size`）が 10% 未満の状態が 5 分続く（マウント先ごと） | `disk_free_percent` / `disk_free_for` |
+| CPU の高温 | CPU の温度が 75℃ を超えた状態が 5 分続く | `cpu_temp_celsius` / `cpu_temp_for` |
+| メモリの不足 | 使えるメモリ（`MemAvailable / MemTotal`）が 10% 未満の状態が 5 分続く | `memory_available_percent` / `memory_available_for` |
+| メトリクスが届かない | `instances` のホストのメトリクスが 10 分届かない（Pi の停止・ネットワーク断・Alloy の停止） | `instances` / `no_metrics_for` |
+| 低電圧 | `rpi_volt` の低電圧の警告（スロットリングの原因）を検知した | `undervoltage_for` |
+
+| 変数 | 既定 | 内容 |
+|---|---|---|
+| `grafana_url` | （必須・sensitive） | スタックの URL（`https://<stack>.grafana.net`） |
+| `grafana_auth` | （必須・sensitive） | Terraform 用のサービスアカウントのトークン |
+| `slack_webhook_url` | （必須・sensitive） | Slack の Incoming Webhook の URL |
+| `prometheus_data_source_name` | `grafanacloud-<stack>-prom` | Prometheus のデータソース名（スタックの URL から決める） |
+| `job` | `integrations/node_exporter` | `job` ラベル（roles/alloy の `alloy_job`） |
+| `instances` | `["rpi-01"]` | 停止を検知するホスト（roles/alloy を適用したホスト） |
+| `repeat_interval` | `4h` | 同じアラートを繰り返し通知する間隔 |
+
+- Pi が止まるとほかのルールはデータがなくなるが、通知は「メトリクスが届かない」だけにする（ほかのルールの `no_data_state` は `OK`）。クエリの失敗は `Error`（DatasourceError）として通知する
+- 「メトリクスが届かない」は `absent_over_time` で判定するため、ホストを `instances` に並べる（Alloy を適用したホストを増やしたら追加する）。USB が外れてマウント先のメトリクスが届かなくなった場合は、このルールでは検知しない
+- 高温によるスロットリング（85℃ から）は、その手前の「CPU の高温」で通知する
+- アラートはフォルダと名前でまとめて（`group_by`）、30 秒待ってから送る
+- Terraform で作ったアラートルール・通知先・通知ポリシーは画面では編集できない（provisioned）。ダッシュボードは画面で変えられるが、次の `apply` で戻る
+- state はローカル（`terraform/grafana-cloud/terraform.tfstate`）に置く。Webhook URL などが含まれるため Git 管理外（`.gitignore`）にし、消さないこと（消すと既存のリソースを管理できなくなる）
+
+事前準備（初回だけ。スタックは roles/alloy の事前準備で作ったものを使う。Terraform では管理しない）:
+
+1. Grafana Cloud のスタック（`https://<stack>.grafana.net`。ブラウザで Grafana を開く URL で、roles/alloy の送信先の `https://prometheus-prod-...grafana.net` ではない）の Administration → Users and access → Service accounts で、Terraform 専用のサービスアカウント（Role は Admin）を作り、「Add service account token」でトークン（`glsa_...`）を発行する
+2. Slack で通知を送るチャンネルの Incoming Webhook を作り、URL（`https://hooks.slack.com/services/...`）を控える
+3. Terraform（1.14 系）をインストールする（`brew install terraform` など）
+4. `terraform.tfvars` を作る（`TF_VAR_grafana_url` などの環境変数で渡してもよい）
+   ```sh
+   cd terraform/grafana-cloud
+   cp terraform.tfvars.example terraform.tfvars
+   # grafana_url / grafana_auth / slack_webhook_url を設定する
+   ```
+
+```sh
+cd terraform/grafana-cloud
+terraform init
+terraform plan    # 差分を確認する
+terraform apply
+terraform plan    # 続けて実行すると差分がない（No changes）
+```
+
+通知を確認するときは、`terraform.tfvars` でしきい値を一時的に変えて（例: `cpu_temp_celsius = 30`、`cpu_temp_for = "0s"`）`apply` すると Slack に通知が届き、戻して `apply` すると解決（Resolved）の通知が届く。`sudo systemctl stop alloy` で Alloy を止めると、10 分後に「メトリクスが届かない」が通知される。
+
+運用規約:
+
+- ダッシュボード・アラート・通知の変更は Terraform で行う（画面で変えても次の `apply` で戻る）。ダッシュボードを画面で作り直した場合は、JSON を書き出して `dashboards/raspberry-pi.json.tftpl` に反映する（`${...}` は Terraform が埋めるため、Grafana の変数は `$instance` の形で書く）
+- サービスアカウントのトークンは Terraform 専用にし、Alloy のトークン（`metrics:write` だけ）とは分ける
+- Terraform・プロバイダのバージョンを上げるときは `versions.tf` を変え、`terraform init -upgrade` と `terraform providers lock -platform=darwin_arm64 -platform=darwin_amd64 -platform=linux_amd64 -platform=linux_arm64` で `.terraform.lock.hcl` を更新してコミットする
+- アプリのログのアラートはここでは扱わない（ログの収集の Issue で扱う）
 
 ## Raspberry Pi を追加する
 
