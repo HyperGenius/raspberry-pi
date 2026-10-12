@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# 既定（infinity）のままだと、NTP サーバーにつながらないときに time-sync.target の後の unit が起動しない。
+# 上限を超えるとこの unit は failed になり、time-sync.target はそのまま到達する（待っていた unit は同期前の時刻で起動する）
+[Service]
+TimeoutStartSec={{ time_sync_wait_timeout }}

@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# 起動時に、時刻が同期されてから（systemd-time-wait-sync.service が終わってから）起動する
+[Unit]
+Wants=time-sync.target
+After=time-sync.target

@@ -34,7 +34,8 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）と、監視（Grafa
 │   ├── epgstation/           # Mirakurun + EPGStation でテレビ番組を録画する（PX-S1UD、ハードウェアエンコード）
 │   ├── plex/                 # Plex Media Server で USB のディレクトリを LAN に配信する
 │   ├── alloy/                # Grafana Alloy でメトリクス（容量・温度・CPU・メモリ・サービスとコンテナの状態）を Grafana Cloud に送る
-│   └── common/               # 全台共通の初期設定
+│   ├── common/               # 全台共通の初期設定
+│   └── time_sync/            # 時刻の同期（systemd-timesyncd）と、起動時に録画系の unit を同期の後にする
 └── terraform/
     └── grafana-cloud/        # Grafana Cloud のダッシュボード・アラート・Slack への通知（Terraform）
         ├── versions.tf       # Terraform・Grafana プロバイダのバージョン（.terraform.lock.hcl もコミットする）
@@ -225,6 +226,53 @@ Docker 公式の apt リポジトリ（`download.docker.com/linux/debian`）か�
 
 ```sh
 ansible-playbook playbooks/site.yml --limit rpi-01 --tags docker
+```
+
+## 時刻同期（roles/time_sync）
+
+Raspberry Pi 4 には RTC がないため、起動直後の時刻は前回保存した時刻から始まる（電源を切っていた時間だけ遅れる）。録画は時刻が正確であることが前提なので、NTP サーバーと、起動時に時刻の同期を待つ unit を管理する。
+
+| 対象 | 設定 | ファイル |
+|---|---|---|
+| systemd-timesyncd | NTP サーバー（`NTP=` / `FallbackNTP=`）、時刻の保存の間隔（`SaveIntervalSec=`） | `/etc/systemd/timesyncd.conf.d/90-time-sync.conf` |
+| systemd-time-wait-sync.service | 有効にする（起動時に、同期されるまで `time-sync.target` を待たせる）。待つ上限を `TimeoutStartSec=` で決める | `/etc/systemd/system/systemd-time-wait-sync.service.d/90-time-sync.conf` |
+| `time_sync_wait_units` の unit | `Wants=` / `After=time-sync.target` | `/etc/systemd/system/<unit>.d/90-time-sync.conf` |
+
+| 変数 | 既定 | 内容 |
+|---|---|---|
+| `time_sync_ntp_servers` | `[ntp.nict.jp]` | 使う NTP サーバー |
+| `time_sync_fallback_ntp_servers` | `0〜3.debian.pool.ntp.org` | `time_sync_ntp_servers` がすべて使えないときの NTP サーバー（Debian の既定と同じ） |
+| `time_sync_save_interval` | `5m` | 時刻を `/var/lib/systemd/timesync/clock`（mtime）に保存する間隔（Raspberry Pi OS の既定と同じ） |
+| `time_sync_wait_at_boot` | `true` | 起動時に同期を待つ（`false` なら systemd-time-wait-sync を無効にし、drop-in をすべて削除する） |
+| `time_sync_wait_timeout` | `2min` | 同期を待つ上限（`infinity` は不可） |
+| `time_sync_wait_units` | `[]` | 同期を待ってから起動する unit。inventory（`group_vars/raspberry_pi`）では、epgstation グループのホストで `docker.service` と `epgstation.service` を指定している |
+
+- 時刻同期のデーモンは、導入済みの systemd-timesyncd をそのまま使う（SNTP。ずれは数十 ms 以内で、録画の用途には十分なため、chrony は使わない）
+- NTP サーバーは drop-in に書き、パッケージの `/etc/systemd/timesyncd.conf` は編集しない。変更したら timesyncd を再起動する。DHCP で配られる NTP サーバーは使わない（ネットワークは NetworkManager が管理しており、timesyncd に渡らない）
+- `time_sync_ntp_servers` のサーバー（のすべてのアドレス）に応答がなければ、`time_sync_fallback_ntp_servers` に切り替える
+- 時刻の保存の間隔は 5 分のままにする。書き込みは clock ファイルの mtime の更新だけなので、SD カードへの影響は小さい。起動直後のずれは主に電源を切っていた時間で決まり、間隔を短くしてもあまり縮まらない。録画系の unit は同期を待ってから起動するため、このずれの影響を受けない
+- 起動時の同期待ち: `systemd-time-wait-sync.service` が同期まで終わらず、`time_sync_wait_units` の unit はその後（`time-sync.target` の後）に起動する
+  - `epgstation.service`（Mirakurun・DB・EPGStation の compose）を待たせる
+  - `docker.service` も待たせる。電源が落ちた後は、`compose down` されずに残ったコンテナ（`restart: unless-stopped`）を、dockerd が `epgstation.service` より先に起動するため。そのため sftpgo・plex の起動も同期まで待つ（2026-10-11 の起動では、Docker の起動から同期まで約 7 秒）
+  - OnCalendar の timer（`apt-daily.timer` など）は、systemd が自動で `time-sync.target` の後にする
+- NTP サーバーにつながらないときは、`time_sync_wait_timeout`（既定 2 分）で待つのをやめる。`systemd-time-wait-sync.service` は failed になり、待っていた unit は同期前の時刻で起動する（起動が止まり続けることはない）
+- unit の drop-in は `daemon-reload` だけで反映する（`After=` は起動時にだけ効くため、unit は再起動しない。録画中でも実行できる）。unit がまだなくてもよい。`time_sync_wait_units` から外した unit の drop-in は削除する
+- 最後に、timesyncd の NTP サーバーが設定どおりであること、NTP サーバーから応答があること、時刻が同期されていること（`timedatectl show -p NTPSynchronized --value` が `yes`）、使っている NTP サーバーが設定のどれかであることを確認する（応答と同期はそれぞれ最大 1 分待つ）
+- 単独で実行する場合は `--tags time_sync`
+
+```sh
+ansible-playbook playbooks/site.yml --limit rpi-01 --tags time_sync --check --diff   # 予定を確認
+ansible-playbook playbooks/site.yml --limit rpi-01 --tags time_sync
+```
+
+確認:
+
+```sh
+timedatectl                                   # System clock synchronized: yes / NTP service: active
+timedatectl timesync-status                   # Server（使っている NTP サーバー）・Offset（ずれ）
+systemctl status systemd-time-wait-sync       # 起動時に同期を待てたか（failed なら上限を超えた）
+# 同期と、Mirakurun・DB・EPGStation の起動の順序（起動からの秒数）
+journalctl -b -o short-monotonic -u systemd-timesyncd -u systemd-time-wait-sync -u docker -u epgstation
 ```
 
 ## ファイル共有（roles/sftpgo）

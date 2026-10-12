@@ -43,6 +43,9 @@
       tags: [docker]
     - role: common
       tags: [common]
+    # 時刻を NTP で同期し、起動時に録画系の unit を同期の後にする（common のタイムゾーンの後）
+    - role: time_sync
+      tags: [time_sync]
 
 # SFTPGo で USB のディレクトリを LAN に公開する（sftpgo グループのホストだけ）。
 # ユーザーのパスワードのハッシュを vault から読み込むため --ask-vault-pass が必要。
