@@ -26,6 +26,10 @@
   hosts: raspberry_pi
   become: true
   roles:
+    # hostname・タイムゾーン・共通パッケージ。ほかの role に依存しないため先頭で実行する
+    # （後ろの role が失敗・中断しても適用されるように）
+    - role: common
+      tags: [common]
     # ネットワークを変更する（実機専用。Molecule では --skip-tags hardware で除外する）
     - role: static_ip
       tags: [static_ip, network, hardware]
@@ -41,8 +45,6 @@
     # Docker を導入する（/var/lib/docker に p3 がマウントされていなければ何もせずに失敗する）
     - role: docker
       tags: [docker]
-    - role: common
-      tags: [common]
 
 # SFTPGo で USB のディレクトリを LAN に公開する（sftpgo グループのホストだけ）。
 # ユーザーのパスワードのハッシュを vault から読み込むため --ask-vault-pass が必要。

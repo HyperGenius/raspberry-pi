@@ -2,6 +2,7 @@
 # roles/bootfs で生成。直接編集しないこと
 hostname: {{ bootfs_hostname | to_json }}
 manage_etc_hosts: true
+timezone: {{ bootfs_timezone | to_json }}
 
 enable_ssh: true
 ssh_pwauth: false
