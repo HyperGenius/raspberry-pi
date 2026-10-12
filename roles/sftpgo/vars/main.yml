@@ -6,6 +6,7 @@ sftpgo_container_name: sftpgo
 # コンテナ内のパス
 sftpgo_container_share_dir: /srv/share
 sftpgo_container_folders_dir: /srv/folders  # sftpgo_folders は <この下>/<名前> にマウントする
+sftpgo_container_empty_dir: /srv/empty      # root: empty のユーザーの /（tmpfs。root の所有で、UID 1000 は書き込めない）
 sftpgo_container_users_file: /etc/sftpgo/users.json
 
 # コンテナ内のポート（1024 未満は UID 1000 では使えないため、ホスト側のポートとは分ける）
@@ -14,7 +15,7 @@ sftpgo_container_webdav_port: 10080
 sftpgo_container_sftp_port: 2022
 
 # 公開するディレクトリのホスト側のパス（実行前のチェック・RequiresMountsFor・検証で使う）
-sftpgo_share_dirs: "{{ [sftpgo_share_dir] + sftpgo_folders.values() | list }}"
+sftpgo_share_dirs: "{{ ([sftpgo_share_dir] + sftpgo_folders.values() | list) | unique }}"
 
 # 公開するポート（ホスト側が 0 のものは除く）
 sftpgo_ports: >-

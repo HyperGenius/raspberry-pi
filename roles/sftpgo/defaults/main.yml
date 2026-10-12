@@ -2,11 +2,12 @@
 # SFTPGo のイメージ（バージョンを固定する。上げるときは https://github.com/drakkan/sftpgo/releases を確認する）
 sftpgo_image: drakkan/sftpgo:v2.7.6
 
-# 公開するディレクトリ（USB の ext4 上にあること。NTFS は不可）。全ユーザーの / になる
+# 公開するディレクトリ（USB の ext4 上にあること。NTFS は不可）。root: empty にしたユーザー以外の / になる
 sftpgo_share_dir: /mnt/data/encoded
 
-# 追加で公開するディレクトリ（名前: ホストのパス）。USB の ext4 上にあること。
+# 追加で公開するディレクトリ（名前: ホストのパス）。USB の ext4 上にあること。sftpgo_share_dir と同じパスでもよい。
 # ユーザーごとに virtual_folders で、見せるかどうかと仮想パスを指定する（指定しないユーザーには見えない）
+#   data: /mnt/data/encoded
 #   share: /mnt/share
 sftpgo_folders: {}
 
@@ -34,6 +35,7 @@ sftpgo_allowed_networks: []
 #       /share: ["*"]           # virtual_folders の仮想パスの権限は必ず書く（書かないと / の権限を引き継ぐ）
 #     virtual_folders:          # 仮想パス: sftpgo_folders の名前。省略時は sftpgo_share_dir だけ
 #       /share: share
+#     root: empty               # / を空にして virtual_folders だけを見せる。省略時は share_dir（/ が sftpgo_share_dir）
 #     allowed_networks: [...]   # 省略時は sftpgo_allowed_networks
 sftpgo_users: []
 

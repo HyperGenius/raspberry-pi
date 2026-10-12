@@ -39,6 +39,12 @@ services:
         bind:
           create_host_path: false
 {% endfor %}
+      # root: empty のユーザーの /。メモリ上の空のディレクトリ（root の所有・0755 なので UID 1000 は書き込めない）
+      - type: tmpfs
+        target: {{ sftpgo_container_empty_dir }}
+        tmpfs:
+          size: 65536
+          mode: 0755
       # multipart のアップロードは /tmp に一時ファイルを作る（コンテナのレイヤー = SD カードに書かない）
       - type: bind
         source: {{ sftpgo_tmp_dir }}

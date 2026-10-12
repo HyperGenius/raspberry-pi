@@ -28,10 +28,9 @@
     that:
       - item.key is match('^[A-Za-z0-9_-]+$')
       - item.value is match('^/.+[^/]$')
-      - item.value != sftpgo_share_dir
       - not (sftpgo_tmp_dir ~ '/').startswith(item.value ~ '/')
     fail_msg: >-
-      sftpgo_folders の {{ item.key }} は、名前を英数字・_・- にし、パスは絶対パス（末尾の / なし）で sftpgo_share_dir と別にすること。
+      sftpgo_folders の {{ item.key }} は、名前を英数字・_・- にし、パスは絶対パス（末尾の / なし）にすること。
       sftpgo_tmp_dir を中に含めないこと
     quiet: true
   loop: "{{ sftpgo_folders | dict2items }}"
@@ -42,12 +41,13 @@
 - name: Validate the virtual folders of the users
   ansible.builtin.assert:
     that:
+      - item.root | default('share_dir') in ['share_dir', 'empty']
       - item.virtual_folders | default({}) is mapping
       - item.virtual_folders | default({}) | list | reject('match', '^/[^/]+$') | list | length == 0
       - item.virtual_folders | default({}) | dict2items | map(attribute='value') | difference(sftpgo_folders | list) | length == 0
       - item.virtual_folders | default({}) | list | difference(item.permissions | list) | length == 0
     fail_msg: >-
-      {{ item.name }} の virtual_folders は「仮想パス: sftpgo_folders の名前」にし、仮想パスは /share のように / の直下にすること。
+      {{ item.name }} の root は share_dir か empty にすること。virtual_folders は「仮想パス: sftpgo_folders の名前」にし、仮想パスは /share のように / の直下にすること。
       仮想パスの権限を permissions に書くこと
     quiet: true
   loop: "{{ sftpgo_users }}"
@@ -222,7 +222,7 @@
       ansible.builtin.assert:
         that:
           - sftpgo_container.State.Running
-          - sftpgo_container.Mounts | selectattr('Type', 'eq', 'bind') | map(attribute='Source') | sort ==
+          - sftpgo_container.Mounts | selectattr('Type', 'eq', 'bind') | map(attribute='Source') | unique | sort ==
             (sftpgo_share_dirs + [sftpgo_tmp_dir, sftpgo_dir ~ '/users.json']) | sort
         fail_msg: >-
           コンテナが起動していないか、bind mount が想定と異なる（Running: {{ sftpgo_container.State.Running }},
