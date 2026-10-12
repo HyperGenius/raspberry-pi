@@ -4,7 +4,7 @@
 Description=SFTPGo file server (docker compose)
 Requires=docker.service
 After=docker.service
-RequiresMountsFor={{ sftpgo_share_dir }} {{ sftpgo_tmp_dir }}
+RequiresMountsFor={{ (sftpgo_share_dirs + [sftpgo_tmp_dir]) | join(' ') }}
 
 [Service]
 Type=oneshot

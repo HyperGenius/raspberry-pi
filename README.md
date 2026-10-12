@@ -277,7 +277,7 @@ journalctl -b -o short-monotonic -u systemd-timesyncd -u systemd-time-wait-sync 
 
 ## ファイル共有（roles/sftpgo）
 
-[SFTPGo](https://github.com/drakkan/sftpgo) を Docker で動かし、USB のディレクトリ（既定 `/mnt/data/encoded`）を LAN に公開する。ブラウザ（Web クライアント）に加えて、REST API と WebDAV で一覧・取得・アップロードができる。`sftpgo` グループのホスト（`hosts.yml`）だけに適用する。
+[SFTPGo](https://github.com/drakkan/sftpgo) を Docker で動かし、USB のディレクトリ（既定 `/mnt/data/encoded`。`sftpgo_folders` で追加できる）を LAN に公開する。ブラウザ（Web クライアント）に加えて、REST API と WebDAV で一覧・取得・アップロードができる。`sftpgo` グループのホスト（`hosts.yml`）だけに適用する。
 
 | 構成 | 内容 |
 |---|---|
@@ -290,41 +290,52 @@ journalctl -b -o short-monotonic -u systemd-timesyncd -u systemd-time-wait-sync 
 | 変数 | 既定 | 内容 |
 |---|---|---|
 | `sftpgo_image` | `drakkan/sftpgo:v2.7.6` | イメージ（バージョンを固定する） |
-| `sftpgo_share_dir` | `/mnt/data/encoded` | 公開するディレクトリ（USB の ext4 上） |
+| `sftpgo_share_dir` | `/mnt/data/encoded` | 公開するディレクトリ（USB の ext4 上）。全ユーザーの `/` になる |
+| `sftpgo_folders` | `{}` | 追加で公開するディレクトリ（`名前: ホストのパス`。USB の ext4 上）。ユーザーの `virtual_folders` で見せる |
 | `sftpgo_tmp_dir` | `/mnt/data/.sftpgo-tmp` | 一時ファイルの置き場所（USB 上、`sftpgo_share_dir` の外） |
 | `sftpgo_uid` / `sftpgo_gid` | `1000` / `1000` | コンテナの UID / GID（アップロードしたファイルの所有者） |
 | `sftpgo_http_port` | `8080` | REST API と Web クライアント（`0` で無効） |
 | `sftpgo_webdav_port` | `10080` | WebDAV（`0` で無効） |
 | `sftpgo_sftp_port` | `0` | SFTP（`0` で無効。22 は sshd が使う） |
 | `sftpgo_allowed_networks` | `[]` | 接続を許可するネットワーク（CIDR）。空なら制限しない |
-| `sftpgo_users` | `[]` | ユーザーの一覧（`name` / `password_hash` / `permissions` / `allowed_networks`） |
+| `sftpgo_users` | `[]` | ユーザーの一覧（`name` / `password_hash` / `permissions` / `virtual_folders` / `allowed_networks`） |
 
 ユーザーは `host_vars/<host>.yml` に書き、パスワードのハッシュは vault に置く。
 
 ```yaml
 sftpgo_allowed_networks: [192.168.10.0/24]
+sftpgo_folders:
+  share: /mnt/share
 sftpgo_users:
   - name: client
     password_hash: "{{ vault_sftpgo_client_password_hash }}"  # openssl passwd -6 で生成し、vault に置く
     permissions:          # パスごとの権限（SFTPGo の permissions）
       /: [list, download, upload, create_dirs]
+  - name: genius
+    password_hash: "{{ vault_sftpgo_genius_password_hash }}"
+    permissions:
+      /: [list, download]
+      /share: ["*"]       # virtual_folders の仮想パスの権限は必ず書く
+    virtual_folders:      # 仮想パス: sftpgo_folders の名前
+      /share: share
 ```
 
 - 権限は `list`（一覧）、`download`、`upload`（新規のみ）、`overwrite`（上書き）、`delete`、`rename`、`create_dirs` など。`"*"` は全権限。`/sub` のようにパスごとに変えられる
+- `sftpgo_folders` のディレクトリは、`virtual_folders` に書いたユーザーにだけ見える（SFTPGo の virtual folders）。仮想パスは `/share` のように `/` の直下にする。仮想パスの権限を `permissions` に書かないと SFTPGo は `/` の権限を引き継ぐため、書いていなければ失敗させる
 - ユーザーは `users.json` だけで定義する（SFTPGo の memory プロバイダ。DB を持たない）。`sftpgo_users` から消したユーザーはログインできなくなる。Web 管理画面は無効にしている。管理者は無効（status 0）なものを 1 人だけ置く（管理者が 1 人もいないと、Web クライアントが初期設定画面にリダイレクトされて使えないため）
 - Web クライアントでの共有リンク（ログインなしでアクセスできる）、パスワードの変更、二要素認証などは無効にしている（再起動で消えるため）
 - アップロードはアトミック（同じディレクトリの `.sftpgo-upload.*` に書き、完了したらリネームする）。途中のファイルは元の名前では現れない。コンテナが強制終了した場合などに `.sftpgo-upload.*` が残ることがある
 - multipart のアップロード（Web クライアントからのアップロード、`POST /api/v2/user/files`）は、一時ファイルを `sftpgo_tmp_dir` に書いてから移す。SD カードには書かない
-- 実行前に、`docker compose` が使えること、`sftpgo_share_dir` と `sftpgo_tmp_dir` の親が USB の ext4（`/` 以外のマウント）上にあることを確認する（満たさなければ何も変更せずに失敗する）。UID `sftpgo_uid` が `sftpgo_share_dir` に書き込めない場合は `[要確認]` を表示する（chown はしない）
+- 実行前に、`docker compose` が使えること、`sftpgo_share_dir`・`sftpgo_folders` と `sftpgo_tmp_dir` の親が USB の ext4（`/` 以外のマウント）上にあることを確認する（満たさなければ何も変更せずに失敗する）。UID `sftpgo_uid` が `sftpgo_share_dir`・`sftpgo_folders` に書き込めない場合は `[要確認]` を表示する（chown はしない）
 - bind mount は `create_host_path: false` にし、systemd のユニットで USB のマウントを待つ。USB がマウントされていなければ起動しない（SD カード上のディレクトリを公開しない）
 - `compose.yml` / `users.json` を変更すると、`sftpgo.service` を再起動してコンテナを作り直す（接続中の転送は切れる）
-- 最後に、コンテナの bind mount が 3 つ（`sftpgo_share_dir`、`sftpgo_tmp_dir`、`users.json`）だけであること、`users.json` を読み込めたこと（ログに `data loading failed` がないこと）、`/healthz` が `ok` を返すことを確認する
+- 最後に、コンテナの bind mount が `sftpgo_share_dir`、`sftpgo_folders`、`sftpgo_tmp_dir`、`users.json` だけであること、`users.json` を読み込めたこと（ログに `data loading failed` がないこと）、`/healthz` が `ok` を返すことを確認する
 - vault を読み込むため、実行には `--ask-vault-pass` が必要。vault は `sftpgo` タグのタスクでだけ読み込むので、`--tags docker` などでは不要
 - 単独で実行する場合は `--tags sftpgo`
 
 ```sh
 openssl passwd -6                                  # パスワードのハッシュを生成
-ansible-vault edit inventories/home/vault.yml      # vault_sftpgo_client_password_hash を追加
+ansible-vault edit inventories/home/vault.yml      # vault_sftpgo_client_password_hash などを追加
 ansible-playbook playbooks/site.yml --limit rpi-01 --tags sftpgo --ask-vault-pass
 ```
 
@@ -349,6 +360,7 @@ curl -H "Authorization: Bearer $T" --data-binary @file.mp4 "$B/api/v2/user/files
 - API の仕様: `http://192.168.10.55:8080/openapi/`（Swagger UI）
 - ブラウザ: `http://192.168.10.55:8080/`（Web クライアント）
 - WebDAV: `http://192.168.10.55:10080/`（Finder の「サーバへ接続」など）
+- `/mnt/share` は `genius` ユーザーで `/share` に見える。Windows のエクスプローラーは HTTP の WebDAV で Basic 認証を使わない（既定の設定）ため、WinSCP（プロトコルに WebDAV を選ぶ）や rclone、ブラウザの Web クライアントを使う
 
 運用規約:
 

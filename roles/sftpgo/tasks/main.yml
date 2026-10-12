@@ -23,6 +23,37 @@
       sftpgo_tmp_dir は sftpgo_share_dir の外に置くこと。SFTP を有効にする場合は sftpgo_uid / sftpgo_gid を 1000 にすること
     quiet: true
 
+- name: Validate sftpgo_folders
+  ansible.builtin.assert:
+    that:
+      - item.key is match('^[A-Za-z0-9_-]+$')
+      - item.value is match('^/.+[^/]$')
+      - item.value != sftpgo_share_dir
+      - not (sftpgo_tmp_dir ~ '/').startswith(item.value ~ '/')
+    fail_msg: >-
+      sftpgo_folders の {{ item.key }} は、名前を英数字・_・- にし、パスは絶対パス（末尾の / なし）で sftpgo_share_dir と別にすること。
+      sftpgo_tmp_dir を中に含めないこと
+    quiet: true
+  loop: "{{ sftpgo_folders | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+# 仮想パスの権限を書かないと、SFTPGo は親（/）の権限を引き継ぐ。設定の漏れで意図しない権限にならないよう、明示させる
+- name: Validate the virtual folders of the users
+  ansible.builtin.assert:
+    that:
+      - item.virtual_folders | default({}) is mapping
+      - item.virtual_folders | default({}) | list | reject('match', '^/[^/]+$') | list | length == 0
+      - item.virtual_folders | default({}) | dict2items | map(attribute='value') | difference(sftpgo_folders | list) | length == 0
+      - item.virtual_folders | default({}) | list | difference(item.permissions | list) | length == 0
+    fail_msg: >-
+      {{ item.name }} の virtual_folders は「仮想パス: sftpgo_folders の名前」にし、仮想パスは /share のように / の直下にすること。
+      仮想パスの権限を permissions に書くこと
+    quiet: true
+  loop: "{{ sftpgo_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 # ---- 実行前チェック（何も変更する前に確認する）----
 - name: Check that docker compose is available
   ansible.builtin.command: docker compose version
@@ -37,23 +68,25 @@
     fail_msg: docker compose が使えない。先に docker role（--tags docker）を実行すること
     quiet: true
 
-- name: Check {{ sftpgo_share_dir }}
+- name: Check the shared directories
   ansible.builtin.stat:
-    path: "{{ sftpgo_share_dir }}"
+    path: "{{ item }}"
+  loop: "{{ sftpgo_share_dirs }}"
   register: sftpgo_share_stat
 
-- name: Fail unless {{ sftpgo_share_dir }} exists
+- name: Fail unless the shared directories exist
   ansible.builtin.assert:
-    that: sftpgo_share_stat.stat.isdir | default(false)
-    fail_msg: "{{ sftpgo_share_dir }} がない。USB がマウントされているか確認すること（--tags usb_storage）"
+    that: item.stat.isdir | default(false)
+    fail_msg: "{{ item.item }} がない。USB がマウントされているか確認すること（--tags usb_storage）"
     quiet: true
+  loop: "{{ sftpgo_share_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
 
 # USB がマウントされていなければ、パスは SD カード（/）上になる
 - name: Find the filesystems under the shared and temporary directories
   ansible.builtin.command: findmnt -n -o TARGET,FSTYPE --target {{ item }}
-  loop:
-    - "{{ sftpgo_share_dir }}"
-    - "{{ sftpgo_tmp_dir | dirname }}"
+  loop: "{{ sftpgo_share_dirs + [sftpgo_tmp_dir | dirname] }}"
   register: sftpgo_findmnt
   changed_when: false
   check_mode: false  # 読み取りのみ
@@ -69,21 +102,25 @@
   loop_control:
     label: "{{ item.item }}"
 
-- name: Check that UID {{ sftpgo_uid }} can write to {{ sftpgo_share_dir }}
+- name: Check that UID {{ sftpgo_uid }} can write to the shared directories
   ansible.builtin.command:
-    argv: [setpriv, "--reuid={{ sftpgo_uid }}", "--regid={{ sftpgo_gid }}", --clear-groups, test, -w, "{{ sftpgo_share_dir }}"]
+    argv: [setpriv, "--reuid={{ sftpgo_uid }}", "--regid={{ sftpgo_gid }}", --clear-groups, test, -w, "{{ item }}"]
+  loop: "{{ sftpgo_share_dirs }}"
   register: sftpgo_share_writable
   changed_when: false
   failed_when: false
   check_mode: false  # 読み取りのみ
 
 # 既存のファイルの所有者は変更しない（chown しない）ため、書き込めなくても失敗させず、手作業で判断する
-- name: Warn if UID {{ sftpgo_uid }} cannot write to {{ sftpgo_share_dir }}
+- name: Warn if UID {{ sftpgo_uid }} cannot write to the shared directories
   ansible.builtin.debug:
     msg: >-
-      [要確認] UID {{ sftpgo_uid }} が {{ sftpgo_share_dir }} に書き込めない。アップロードは失敗する（読み取りはできる）。
+      [要確認] UID {{ sftpgo_uid }} が {{ item.item }} に書き込めない。アップロードは失敗する（読み取りはできる）。
       所有者・パーミッションの変更は手作業で判断すること
-  when: sftpgo_share_writable.rc != 0
+  when: item.rc != 0
+  loop: "{{ sftpgo_share_writable.results }}"
+  loop_control:
+    label: "{{ item.item }}"
 
 # ---- イメージ（起動時にネットワークに依存しないよう、先に取得しておく）----
 - name: Check whether {{ sftpgo_image }} is present
@@ -180,13 +217,13 @@
       ansible.builtin.set_fact:
         sftpgo_container: "{{ (sftpgo_inspect.stdout | from_json) | first }}"
 
-    # 公開するのは sftpgo_share_dir だけ（USB の全体はマウントしていない）
+    # 公開するのは sftpgo_share_dir と sftpgo_folders だけ（USB の全体はマウントしていない）
     - name: Fail unless the container runs with the expected mounts
       ansible.builtin.assert:
         that:
           - sftpgo_container.State.Running
           - sftpgo_container.Mounts | selectattr('Type', 'eq', 'bind') | map(attribute='Source') | sort ==
-            [sftpgo_share_dir, sftpgo_tmp_dir, sftpgo_dir ~ '/users.json'] | sort
+            (sftpgo_share_dirs + [sftpgo_tmp_dir, sftpgo_dir ~ '/users.json']) | sort
         fail_msg: >-
           コンテナが起動していないか、bind mount が想定と異なる（Running: {{ sftpgo_container.State.Running }},
           bind: {{ sftpgo_container.Mounts | selectattr('Type', 'eq', 'bind') | map(attribute='Source') | join(', ') }}）
