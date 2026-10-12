@@ -1,0 +1,64 @@
+---
+# docker compose のコンテナの状態を書き出す timer（alloy_compose_units が空なら削除する）
+- name: Check whether compose-metrics.timer is installed
+  ansible.builtin.stat:
+    path: /etc/systemd/system/compose-metrics.timer
+  register: alloy_compose_timer_stat
+
+- name: Install compose-metrics
+  when: alloy_compose_units | length > 0
+  block:
+    # 監視する unit が先に作られている（sftpgo などの role を実行済み）ことを確認する。
+    # 複数の unit を指定すると、出力は unit ごとに空行で区切られる
+    - name: Read the load state of the compose units
+      ansible.builtin.command: systemctl show --property=LoadState --value {{ alloy_compose_units | join(' ') }}
+      register: alloy_compose_load_state
+      changed_when: false
+      check_mode: false  # 読み取りのみ
+
+    - name: Fail unless the compose units exist
+      ansible.builtin.assert:
+        that: alloy_compose_load_state.stdout_lines | select | reject('eq', 'loaded') | list | length == 0
+        fail_msg: >-
+          alloy_compose_units の unit が見つからない（{{ alloy_compose_units | zip(alloy_compose_load_state.stdout_lines | select)
+          | rejectattr(1, 'eq', 'loaded') | map(attribute=0) | join(', ') }}）。先に sftpgo などの role を実行すること
+        quiet: true
+
+    - name: Create {{ alloy_compose_metrics_script | dirname }}
+      ansible.builtin.file:
+        path: "{{ alloy_compose_metrics_script | dirname }}"
+        state: directory
+        mode: "0755"
+
+    - name: Install the compose-metrics script
+      ansible.builtin.copy:
+        src: compose-metrics
+        dest: "{{ alloy_compose_metrics_script }}"
+        mode: "0755"
+      register: alloy_compose_script
+
+    - name: Install compose-metrics.service and compose-metrics.timer
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: /etc/systemd/system/{{ item }}
+        mode: "0644"
+      loop: "{{ alloy_compose_metrics_units }}"
+      register: alloy_compose_unit_files
+      notify: Reload systemd
+
+- name: Remove compose-metrics
+  when: alloy_compose_units | length == 0
+  block:
+    - name: Stop compose-metrics.timer
+      ansible.builtin.systemd_service:
+        name: compose-metrics.timer
+        state: stopped
+        enabled: false
+      when: alloy_compose_timer_stat.stat.exists
+
+    - name: Remove the compose-metrics files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ alloy_compose_metrics_units | map('regex_replace', '^', '/etc/systemd/system/') + [alloy_compose_metrics_script, alloy_compose_metrics_dir] }}"
+      notify: Reload systemd

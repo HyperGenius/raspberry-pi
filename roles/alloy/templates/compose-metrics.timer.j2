@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+# compose-metrics.service を 1 分ごとに実行する（Alloy の収集の間隔に合わせる）
+[Unit]
+Description=Write docker compose container states for Alloy every minute
+
+[Timer]
+OnActiveSec=0
+OnUnitActiveSec={{ alloy_scrape_interval }}
+# 既定（1min）だと実行が最大 1 分ずれ、状態の更新が収集の間隔より遅れる
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

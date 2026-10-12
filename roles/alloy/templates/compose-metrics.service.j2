@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+# docker compose のコンテナの状態を {{ alloy_compose_metrics_file }} に書き出す（Alloy の textfile コレクタが読む）。
+# {{ alloy_compose_metrics_dir }} は tmpfs（SD カードに書かない）。実行が終わっても消さず（RuntimeDirectoryPreserve）、OS の再起動で消える
+[Unit]
+Description=Write docker compose container states for Alloy
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart={{ alloy_compose_metrics_script }} --output {{ alloy_compose_metrics_file }} {{ alloy_compose_units | join(' ') }}
+RuntimeDirectory={{ alloy_compose_metrics_dir | basename }}
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+NoNewPrivileges=yes

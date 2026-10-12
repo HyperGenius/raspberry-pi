@@ -37,5 +37,10 @@ alloy_filesystem_mount_points:
   - /mnt/data        # USB（ext4）
   - /mnt/share       # USB（NTFS）
 
+# docker compose を起動する systemd の unit（sftpgo.service など）。unit の状態（systemd コレクタ）と、compose ファイルに
+# あるコンテナの状態（compose-metrics.timer → textfile コレクタ）を送る。空なら送らない（timer も削除する）。
+# systemd コレクタはこの unit だけに絞る（全 unit を送ると系列が増える）
+alloy_compose_units: []
+
 # Alloy のログレベル（debug / info / warn / error）。ログは journald（RAM 上）に出る
 alloy_log_level: warn

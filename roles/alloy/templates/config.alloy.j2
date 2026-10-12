@@ -5,7 +5,19 @@ logging {
 
 // ---- 収集（node_exporter 相当）----
 prometheus.exporter.unix "node" {
-  set_collectors = {{ alloy_collectors | to_json }}
+  set_collectors = {{ alloy_enabled_collectors | to_json }}
+{% if alloy_compose_units | length > 0 %}
+
+  // docker compose を起動する unit の状態だけを送る（全 unit を送ると系列が増える）
+  systemd {
+    unit_include = {{ ('(' ~ (alloy_compose_units | map('regex_escape') | join('|')) ~ ')') | to_json }}
+  }
+
+  // compose-metrics.timer が書き出すコンテナの状態（compose_container_*）
+  textfile {
+    directory = {{ alloy_compose_metrics_dir | to_json }}
+  }
+{% endif %}
 }
 
 // ホストを IP ではなく名前で見分ける

@@ -718,6 +718,267 @@
           "sort": "none"
         }
       }
+    },
+    {
+      "id": 11,
+      "type": "state-timeline",
+      "title": "マウントの状態",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource_uid}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
+          },
+          "refId": "A",
+          "expr": "node_filesystem_readonly{job=\"${job}\",instance=\"$instance\"}",
+          "legendFormat": "{{mountpoint}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "読み書き",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "読み取り専用",
+                  "color": "red",
+                  "index": 1
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0,
+            "insertNulls": 180000
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.8,
+        "alignValue": "left",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "description": "空白はマウントされていない（メトリクスが届かない）期間。マウント先は roles/alloy の alloy_filesystem_mount_points"
+    },
+    {
+      "id": 12,
+      "type": "state-timeline",
+      "title": "サービスの状態",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource_uid}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 29,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
+          },
+          "refId": "A",
+          "expr": "node_systemd_unit_state{job=\"${job}\",instance=\"$instance\",state=\"active\"} + ignoring (state) (2 * node_systemd_unit_state{job=\"${job}\",instance=\"$instance\",state=\"activating\"}) + ignoring (state) (3 * node_systemd_unit_state{job=\"${job}\",instance=\"$instance\",state=\"failed\"})",
+          "legendFormat": "{{name}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "停止",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "稼働",
+                  "color": "green",
+                  "index": 1
+                },
+                "2": {
+                  "text": "起動中",
+                  "color": "yellow",
+                  "index": 2
+                },
+                "3": {
+                  "text": "失敗",
+                  "color": "dark-red",
+                  "index": 3
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0,
+            "insertNulls": 180000
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.8,
+        "alignValue": "left",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "description": "docker compose を起動する unit（roles/alloy の alloy_compose_units）。停止は inactive / deactivating"
+    },
+    {
+      "id": 13,
+      "type": "state-timeline",
+      "title": "コンテナの状態",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource_uid}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 29,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
+          },
+          "refId": "A",
+          "expr": "compose_container_up{job=\"${job}\",instance=\"$instance\"} + 2 * compose_container_unhealthy{job=\"${job}\",instance=\"$instance\"}",
+          "legendFormat": "{{container}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "停止",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "稼働",
+                  "color": "green",
+                  "index": 1
+                },
+                "3": {
+                  "text": "unhealthy",
+                  "color": "orange",
+                  "index": 2
+                }
+              }
+            }
+          ],
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0,
+            "insertNulls": 180000
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.8,
+        "alignValue": "left",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "description": "compose ファイルにあるコンテナ（compose-metrics.timer が 1 分ごとに書き出す）。停止は compose down で削除された場合を含む"
     }
   ]
 }

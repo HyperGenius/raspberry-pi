@@ -16,3 +16,15 @@ alloy_listen_addr: 127.0.0.1:12345
 
 # config.alloy の prometheus.remote_write のラベル（WAL のディレクトリ名・メトリクスのラベルになる）
 alloy_remote_write_name: grafana_cloud
+
+# docker compose のコンテナの状態（alloy_compose_units が空でなければ使う）。
+# スクリプトが tmpfs に書き出し、prometheus.exporter.unix の textfile コレクタが読む
+alloy_compose_metrics_script: /usr/local/libexec/compose-metrics
+alloy_compose_metrics_dir: /run/compose-metrics
+alloy_compose_metrics_file: "{{ alloy_compose_metrics_dir }}/compose.prom"
+alloy_compose_metrics_units:
+  - compose-metrics.service
+  - compose-metrics.timer
+
+# 有効にするコレクタ。alloy_compose_units があれば systemd（unit の状態）と textfile（コンテナの状態）を加える
+alloy_enabled_collectors: "{{ alloy_collectors + (['systemd', 'textfile'] if alloy_compose_units | length > 0 else []) }}"

@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""docker compose のコンテナの状態を、node_exporter の textfile コレクタの形式で書き出す（roles/alloy）。
+
+引数の systemd の unit（docker compose を起動するもの）ごとに、WorkingDirectory の compose ファイルから
+動いているべきコンテナを求め、docker container inspect の状態と合わせて書き出す。
+compose down で削除されたコンテナや、Docker が止まっているときのコンテナも 0（動いていない）として出す。
+失敗したときは出力を更新しない（Grafana の「コンテナの状態を取得できない」で通知される）。
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import tempfile
+
+METRICS = [
+    ("compose_container_up", "gauge", "1 if the container of the compose service is running"),
+    ("compose_container_unhealthy", "gauge", "1 if the health check of the container is unhealthy"),
+    ("compose_container_restart_count", "gauge", "Number of restarts by the restart policy (reset when recreated)"),
+]
+
+
+def run(args, cwd=None):
+    return subprocess.run(args, cwd=cwd, check=True, capture_output=True, text=True).stdout
+
+
+def expected_containers(unit):
+    """unit の compose ファイルにあるサービスの (project, service, container) を返す。"""
+    directory = run(["systemctl", "show", "--property=WorkingDirectory", "--value", unit]).strip()
+    if not directory:
+        raise SystemExit(f"{unit} に WorkingDirectory がない")
+    config = json.loads(run(["docker", "compose", "config", "--format", "json"], cwd=directory))
+    project = config["name"]
+    return [
+        (project, service, spec.get("container_name") or f"{project}-{service}-1")
+        for service, spec in sorted(config.get("services", {}).items())
+    ]
+
+
+def inspect(names):
+    """存在するコンテナの inspect の結果を名前ごとに返す。
+
+    存在しないコンテナがある・Docker が止まっているときは終了コードが 1 になるが、
+    stdout には見つかったコンテナだけが出る（Docker が止まっていれば空）。
+    """
+    result = subprocess.run(["docker", "container", "inspect", *names], capture_output=True, text=True)
+    try:
+        containers = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        containers = []
+    return {c["Name"].lstrip("/"): c for c in containers}
+
+
+def escape(value):
+    return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--output", required=True, help="書き出す .prom ファイル")
+    parser.add_argument("units", nargs="+", help="docker compose を起動する systemd の unit")
+    args = parser.parse_args()
+
+    rows = [(unit, *c) for unit in args.units for c in expected_containers(unit)]
+    states = inspect([container for _, _, _, container in rows])
+
+    lines = []
+    for name, metric_type, help_text in METRICS:
+        lines += [f"# HELP {name} {help_text}", f"# TYPE {name} {metric_type}"]
+        for unit, project, service, container in rows:
+            state = states.get(container, {}).get("State", {})
+            value = {
+                "compose_container_up": int(state.get("Status") == "running"),
+                "compose_container_unhealthy": int((state.get("Health") or {}).get("Status") == "unhealthy"),
+                "compose_container_restart_count": states.get(container, {}).get("RestartCount", 0),
+            }[name]
+            labels = ",".join(
+                f'{k}="{escape(v)}"'
+                for k, v in [("unit", unit), ("project", project), ("service", service), ("container", container)]
+            )
+            lines.append(f"{name}{{{labels}}} {value}")
+
+    # textfile コレクタが書きかけのファイルを読まないよう、同じディレクトリに書いてから置き換える
+    directory = os.path.dirname(os.path.abspath(args.output))
+    with tempfile.NamedTemporaryFile("w", dir=directory, prefix=".compose-metrics.", delete=False) as f:
+        f.write("\n".join(lines) + "\n")
+    os.chmod(f.name, 0o644)
+    os.replace(f.name, args.output)
+
+
+if __name__ == "__main__":
+    main()

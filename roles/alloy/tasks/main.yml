@@ -1,5 +1,5 @@
 ---
-# 実行順序: 設定の検証 → 実行前チェック → apt リポジトリ → インストール → drop-in・トークン・config.alloy →（handler で反映）→ 検証
+# 実行順序: 設定の検証 → 実行前チェック → apt リポジトリ → インストール → drop-in・トークン・compose-metrics・config.alloy →（handler で反映）→ 検証
 - name: Validate alloy settings
   ansible.builtin.assert:
     that:
@@ -11,11 +11,15 @@
       - "'filesystem' in alloy_collectors"
       - alloy_filesystem_mount_points | length > 0
       - alloy_filesystem_mount_points | reject('match', '^/([^/].*[^/])?$') | list | length == 0
+      # systemd・textfile は alloy_compose_units から有効にする（systemd を unit で絞らずに有効にすると系列が増える）
+      - alloy_collectors | intersect(['systemd', 'textfile']) | length == 0
+      - alloy_compose_units | reject('match', '^[A-Za-z0-9@._-]+\\.service$') | list | length == 0
     fail_msg: >-
       alloy_remote_write_url は Grafana Cloud の Prometheus の remote_write の URL（https://.../api/prom/push）、
       alloy_remote_write_username はインスタンス ID（数字）にし、alloy_remote_write_token を設定すること（vault の項目は vault.yml.example を参照）。
       alloy_scrape_interval は数字 + s / m（例: 60s）、alloy_collectors には filesystem を含め、
-      alloy_filesystem_mount_points は絶対パス（末尾の / なし）を 1 つ以上にすること
+      alloy_filesystem_mount_points は絶対パス（末尾の / なし）を 1 つ以上にすること。
+      alloy_collectors に systemd・textfile は入れず（alloy_compose_units から有効にする）、alloy_compose_units は .service の unit 名にすること
     quiet: true
 
 # ---- 実行前チェック（何も変更する前に確認する）----
@@ -122,6 +126,10 @@
   register: alloy_token
   notify: Restart alloy
 
+# ---- docker compose のコンテナの状態 ----
+- name: Set up compose-metrics
+  ansible.builtin.import_tasks: compose_metrics.yml
+
 - name: Write config.alloy
   ansible.builtin.template:
     src: config.alloy.j2
@@ -143,13 +151,23 @@
     state: started
   register: alloy_service
 
+# 起動時（OnActiveSec=0）に 1 回目を書き出す。--check で新しく作る予定の場合は、まだ unit がない
+- name: Start compose-metrics.timer
+  ansible.builtin.systemd_service:
+    name: compose-metrics.timer
+    enabled: true
+    state: started
+  register: alloy_compose_timer
+  when: alloy_compose_units | length > 0 and not (ansible_check_mode and not alloy_compose_timer_stat.stat.exists)
+
 # ---- 検証 ----
 # --check で変更する予定の場合は、まだ反映されていないので検証しない
 - name: Verify Alloy
   when: >-
     not (ansible_check_mode and
          (alloy_package is changed or alloy_dropin_file is changed or alloy_token is changed or alloy_config is changed or
-          alloy_service is changed))
+          alloy_service is changed or alloy_compose_script is changed or alloy_compose_unit_files is changed or
+          alloy_compose_timer is changed))
   vars:
     # samples_total は失敗したサンプルも含む（送信に成功した数 = samples_total - samples_failed_total）
     alloy_samples_regex: '(?m)^prometheus_remote_storage_samples_total\{[^}]*\} (\S+)$'
@@ -216,6 +234,40 @@
           WAL（{{ alloy_storage_path }}/prometheus.remote_write.{{ alloy_remote_write_name }}）が tmpfs 上にない
           （{{ alloy_wal_fstype.stdout or alloy_wal_fstype.stderr }}）。drop-in（{{ alloy_dropin }}）が反映されているか確認すること
         quiet: true
+
+    # unit の状態（systemd コレクタ）とコンテナの状態（textfile コレクタ）が収集されている。
+    # exporter の値は Alloy の API で読める（Grafana Cloud に送る前の値）
+    - name: Verify the compose units and containers
+      when: alloy_compose_units | length > 0
+      vars:
+        alloy_exporter_url: http://{{ alloy_listen_addr }}/api/v0/component/prometheus.exporter.unix.node/metrics
+        alloy_unit_regex: '(?m)^node_systemd_unit_state\{[^}]*name="([^"]+)"'
+        alloy_container_regex: '(?m)^compose_container_up\{[^}]*unit="([^"]+)"'
+      block:
+        # timer の 1 回目の実行を待つ
+        - name: Wait until the exporter reports the containers of every compose unit
+          ansible.builtin.uri:
+            url: "{{ alloy_exporter_url }}"
+            return_content: true
+          register: alloy_exporter_metrics
+          until: alloy_compose_units | reject('in', alloy_exporter_metrics.content | default('') | regex_findall(alloy_container_regex)) | list | length == 0
+          retries: 12
+          delay: 5
+          failed_when: false
+          check_mode: false  # 読み取りのみ
+
+        - name: Fail unless the compose units and containers are collected
+          ansible.builtin.assert:
+            that:
+              - alloy_compose_units | reject('in', alloy_exporter_metrics.content | default('') | regex_findall(alloy_unit_regex)) | list | length == 0
+              - alloy_compose_units | reject('in', alloy_exporter_metrics.content | default('') | regex_findall(alloy_container_regex)) | list | length == 0
+              - alloy_exporter_metrics.content | default('') is search('(?m)^node_textfile_scrape_error 0$')
+            fail_msg: >-
+              unit の状態（node_systemd_unit_state）かコンテナの状態（compose_container_up）が収集されていない
+              （unit: {{ alloy_compose_units | reject('in', alloy_exporter_metrics.content | default('') | regex_findall(alloy_unit_regex)) | join(', ') or 'OK' }} /
+              コンテナ: {{ alloy_compose_units | reject('in', alloy_exporter_metrics.content | default('') | regex_findall(alloy_container_regex)) | join(', ') or 'OK' }}）。
+              journalctl -u compose-metrics.service でエラーを確認すること
+            quiet: true
 
     # 認証の失敗などの再送しないエラーでは、サンプルは失敗として数えて捨てられる。
     # 起動直後は最初の収集（最大 alloy_scrape_interval）と送信を待つ

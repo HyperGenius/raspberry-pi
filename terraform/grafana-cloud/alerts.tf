@@ -9,6 +9,25 @@ locals {
     "absent_over_time(node_uname_info{${local.selector},instance=\"${i}\"}[${var.no_metrics_for}])"
   ])
 
+  # マウントされているべきマウント先ごとの absent_over_time（届いていなければ instance・mountpoint ラベル付きで 1 を返す）。
+  # node_uname_info が同じ期間に届いているホストだけにする。どちらも同じ scrape のサンプルなので、Pi 全体が止まると
+  # 両方が同時に期間から外れ、「メトリクスが届かない」と重複して発火しない
+  mount_missing_expr = join(" or ", flatten([
+    for i, mounts in var.mount_points : [
+      for m in mounts :
+      "(absent_over_time(node_filesystem_size_bytes{${local.selector},instance=\"${i}\",mountpoint=\"${m}\"}[${var.mount_missing_for}]) and on (instance) count_over_time(node_uname_info{${local.selector},instance=\"${i}\"}[${var.mount_missing_for}]))"
+    ]
+  ]))
+
+  # unit が active のコンテナだけを見る（unit が止まっているときは「サービスの停止」で通知し、起動中は待つ）
+  container_down_expr = "compose_container_up{${local.selector}} and on (instance, unit) label_replace(node_systemd_unit_state{${local.selector},state=\"active\"} == 1, \"unit\", \"$1\", \"name\", \"(.+)\")"
+
+  # compose-metrics.timer が書き出すファイルが更新されていない秒数（または textfile の読み込みの失敗）。
+  # Pi が止まったときに「メトリクスが届かない」と重複しないよう、最新の値は 2 分以内のものだけを使う
+  # （その間の秒数は 2 分 + timer の間隔までなので、container_metrics_stale_for は 4 分以上にする）
+  container_metrics_stale_seconds = tonumber(regex("^[0-9]+", var.container_metrics_stale_for)) * (endswith(var.container_metrics_stale_for, "h") ? 3600 : 60)
+  container_metrics_stale_expr    = "(time() - max by (instance) (max_over_time(node_textfile_mtime_seconds{${local.selector}}[2m]))) > ${local.container_metrics_stale_seconds} or max by (instance) (node_textfile_scrape_error{${local.selector}})"
+
   rules = [
     {
       name      = "空き容量の不足"
@@ -55,6 +74,72 @@ locals {
       for       = var.undervoltage_for
       panel     = "undervoltage"
       summary   = "{{ $labels.instance }} で低電圧を検知した（電源・ケーブルを確認する）"
+    },
+    {
+      name      = "マウントされていない"
+      expr      = local.mount_missing_expr
+      evaluator = "gt"
+      threshold = 0
+      for       = "0s"
+      panel     = "mount"
+      summary   = "{{ $labels.instance }} の {{ $labels.mountpoint }} がマウントされていない（${var.mount_missing_for} 以上。USB の切断など。dmesg・findmnt を確認する）"
+    },
+    {
+      # ext4 は I/O エラーで読み取り専用に切り替わる（USB が切断される直前など）
+      name      = "読み取り専用のマウント"
+      expr      = "node_filesystem_readonly{${local.selector}}"
+      evaluator = "gt"
+      threshold = 0
+      for       = var.readonly_for
+      panel     = "mount"
+      summary   = "{{ $labels.instance }} の {{ $labels.mountpoint }} が読み取り専用になっている（I/O エラーの可能性。dmesg を確認する）"
+    },
+    {
+      # roles/alloy の alloy_compose_units（sftpgo.service など）。USB のアンマウントでも止まる（RequiresMountsFor）
+      name      = "サービスの停止"
+      expr      = "node_systemd_unit_state{${local.selector},state=~\"inactive|failed\"}"
+      evaluator = "gt"
+      threshold = 0
+      for       = var.service_down_for
+      panel     = "service"
+      summary   = "{{ $labels.instance }} の {{ $labels.name }} が {{ $labels.state }} になっている（${var.service_down_for} 以上）"
+    },
+    {
+      name      = "コンテナの停止"
+      expr      = local.container_down_expr
+      evaluator = "lt"
+      threshold = 1
+      for       = var.container_down_for
+      panel     = "container"
+      summary   = "{{ $labels.instance }} のコンテナ {{ $labels.container }}（{{ $labels.unit }}）が動いていない（${var.container_down_for} 以上）"
+    },
+    {
+      name      = "コンテナの異常"
+      expr      = "compose_container_unhealthy{${local.selector}}"
+      evaluator = "gt"
+      threshold = 0
+      for       = var.container_unhealthy_for
+      panel     = "container"
+      summary   = "{{ $labels.instance }} のコンテナ {{ $labels.container }}（{{ $labels.unit }}）のヘルスチェックが unhealthy（${var.container_unhealthy_for} 以上）"
+    },
+    {
+      # 再起動の回数（RestartCount）が変わった回数。scrape の間に複数回再起動すると 1 回と数える
+      name      = "コンテナの再起動の繰り返し"
+      expr      = "changes(compose_container_restart_count{${local.selector}}[${var.container_restarts_window}])"
+      evaluator = "gt"
+      threshold = var.container_restarts
+      for       = "0s"
+      panel     = "container"
+      summary   = "{{ $labels.instance }} のコンテナ {{ $labels.container }}（{{ $labels.unit }}）が ${var.container_restarts_window} に {{ printf \"%.0f\" $values.A.Value }} 回再起動した（しきい値: ${var.container_restarts} 回超）"
+    },
+    {
+      name      = "コンテナの状態を取得できない"
+      expr      = local.container_metrics_stale_expr
+      evaluator = "gt"
+      threshold = 0
+      for       = "0s"
+      panel     = "container"
+      summary   = "{{ $labels.instance }} のコンテナの状態が更新されていない（journalctl -u compose-metrics.service を確認する）"
     },
   ]
 }
