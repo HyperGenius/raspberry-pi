@@ -15,8 +15,8 @@ usb_storage_devices:
   - uuid: 96efbf0e-c2e7-4007-b81d-1177c5f73fdc  # sda1
     fstype: ext4
     path: /mnt/data
-  - uuid: 226667176666EACD  # sdb1。Docker の bind mount 先には使わない
-    fstype: ntfs
+  - uuid: a6c04fd5-09d5-4bb7-9d6b-b856611129da  # sdb1（#32 で NTFS から ext4 にフォーマットし直した）
+    fstype: ext4
     path: /mnt/share
 
 # SFTPGo（roles/sftpgo）。/mnt/data/encoded を LAN に公開する。パスワードのハッシュは vault に置く
