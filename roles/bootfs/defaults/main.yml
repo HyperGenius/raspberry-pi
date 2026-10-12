@@ -3,6 +3,8 @@
 bootfs_path: /Volumes/bootfs
 
 bootfs_hostname: "{{ hostname | default(inventory_hostname) }}"
+# 初回起動時から設定する。起動後は roles/common が同じ値を管理する
+bootfs_timezone: "{{ timezone | default('Etc/UTC') }}"
 # cloud-init はこの値が変わらない限り再実行しない
 bootfs_instance_id: "{{ inventory_hostname }}"
 

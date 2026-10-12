@@ -25,6 +25,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）と、監視（Grafa
 │   └── prepare_sd.yml        # 初回起動前に Mac 上で bootfs を準備する
 ├── roles/
 │   ├── bootfs/               # bootfs の user-data / network-config / meta-data / cmdline.txt
+│   ├── common/               # 全台共通の初期設定（hostname・タイムゾーン・共通パッケージ）
 │   ├── static_ip/            # 固定IP
 │   ├── sd_partition/         # SD カードのパーティション構成（root の拡張と Docker 用領域）
 │   ├── sd_longevity/         # SD カードの延命（swap を zram のみに、journald の揮発化、root の noatime）
@@ -33,8 +34,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）と、監視（Grafa
 │   ├── sftpgo/               # SFTPGo で USB のディレクトリを LAN に公開する（REST API / WebDAV / Web クライアント）
 │   ├── epgstation/           # Mirakurun + EPGStation でテレビ番組を録画する（PX-S1UD、ハードウェアエンコード）
 │   ├── plex/                 # Plex Media Server で USB のディレクトリを LAN に配信する
-│   ├── alloy/                # Grafana Alloy でメトリクス（容量・温度・CPU・メモリ）を Grafana Cloud に送る
-│   └── common/               # 全台共通の初期設定
+│   └── alloy/                # Grafana Alloy でメトリクス（容量・温度・CPU・メモリ）を Grafana Cloud に送る
 └── terraform/
     └── grafana-cloud/        # Grafana Cloud のダッシュボード・アラート・Slack への通知（Terraform）
         ├── versions.tf       # Terraform・Grafana プロバイダのバージョン（.terraform.lock.hcl もコミットする）
@@ -54,7 +54,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）と、監視（Grafa
 | ファイル | 扱い |
 |---|---|
 | `cmdline.txt` | `resize` を取り除くだけ（`root=PARTUUID=...` はイメージごとに異なるため丸ごとは管理しない） |
-| `user-data` | inventory から生成（hostname・ユーザー・SSH 公開鍵・root の自動拡張の無効化） |
+| `user-data` | inventory から生成（hostname・タイムゾーン・ユーザー・SSH 公開鍵・root の自動拡張の無効化） |
 | `network-config` | inventory から生成（wlan0 / eth0 とも DHCP） |
 | `meta-data` | inventory から生成（`instance-id`） |
 
@@ -87,6 +87,24 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）と、監視（Grafa
    ```
 
 cloud-init が動くのは初回起動の 1 回だけ（`instance-id` で判定）。起動後に bootfs を編集しても反映されないため、bootfs には SSH で接続できるまでに必要な最小限だけを入れ、それ以外は role で設定する。
+
+## 共通の初期設定（roles/common）
+
+全台に共通の設定をする。ほかの role に依存しないため、`site.yml` の Provision play の先頭で実行する（後ろの role が失敗・中断しても適用されるように）。
+
+| 変数 | 既定 | inventory の値 | 内容 |
+|---|---|---|---|
+| `hostname` | `inventory_hostname` | `host_vars/<host>.yml` | ホスト名 |
+| `timezone` | `Etc/UTC` | `Asia/Tokyo`（`group_vars/all.yml`） | タイムゾーン（`timedatectl`） |
+| `common_packages` | `[]` | `group_vars/raspberry_pi/main.yml` | apt で入れるパッケージ |
+
+- タイムゾーンは初回起動時にも cloud-init（bootfs の `user-data`）で同じ値を設定する。起動後に変えるときは inventory を変えてこの role を実行する
+- コンテナには同じ `timezone` を compose の `TZ` で渡している（`roles/epgstation`・`roles/plex`）。`timezone` を変えたときは、それらの role も実行してコンテナに反映する
+- 単独で実行する場合は `--tags common`
+
+```sh
+ansible-playbook playbooks/site.yml --limit rpi-01 --tags common
+```
 
 ## 固定IP（roles/static_ip）
 
