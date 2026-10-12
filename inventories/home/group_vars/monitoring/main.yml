@@ -3,3 +3,6 @@
 alloy_remote_write_url: "{{ vault_grafana_cloud_prometheus_url }}"
 alloy_remote_write_username: "{{ vault_grafana_cloud_prometheus_username }}"
 alloy_remote_write_token: "{{ vault_grafana_cloud_metrics_token }}"
+
+# docker compose を起動する unit（停止を Grafana Cloud で通知する）。ホストが所属するグループ（= unit 名）から決める
+alloy_compose_units: "{{ ['sftpgo', 'epgstation', 'plex'] | select('in', group_names) | map('regex_replace', '$', '.service') | list }}"

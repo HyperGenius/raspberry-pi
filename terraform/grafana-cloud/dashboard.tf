@@ -21,6 +21,9 @@ locals {
     memory       = 6
     cpu_temp     = 7
     disk         = 8
+    mount        = 11
+    service      = 12
+    container    = 13
   }
 }
 

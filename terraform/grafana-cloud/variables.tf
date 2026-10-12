@@ -149,3 +149,113 @@ variable "undervoltage_for" {
     error_message = "undervoltage_for は数字 + s / m / h にすること（例: 5m）。"
   }
 }
+
+# ---- マウント・サービス・コンテナ ----
+variable "mount_points" {
+  description = "マウントされているべきマウント先（ホストごと。roles/alloy の alloy_filesystem_mount_points と host_vars の usb_storage_devices にそろえる）"
+  type        = map(list(string))
+  default = {
+    "rpi-01" = ["/", "/var/lib/docker", "/mnt/data", "/mnt/share"]
+  }
+
+  validation {
+    condition = (
+      length(flatten(values(var.mount_points))) > 0 &&
+      alltrue([for h in keys(var.mount_points) : contains(var.instances, h)]) &&
+      alltrue([for m in flatten(values(var.mount_points)) : can(regex("^/([A-Za-z0-9._/-]*[A-Za-z0-9._-])?$", m))])
+    )
+    error_message = "mount_points は instances のホストをキーにし、絶対パス（末尾の / なし）を 1 つ以上にすること。"
+  }
+}
+
+variable "mount_missing_for" {
+  description = "マウントされているべきマウント先のメトリクスがこの時間届かなかったら通知する（USB の切断・アンマウント）"
+  type        = string
+  default     = "5m"
+
+  validation {
+    condition     = can(regex("^[0-9]+[mh]$", var.mount_missing_for))
+    error_message = "mount_missing_for は数字 + m / h にすること（例: 5m）。"
+  }
+}
+
+variable "readonly_for" {
+  description = "マウント先が読み取り専用になった状態がこの時間続いたら通知する（0s なら 1 回でも検知したら通知する）"
+  type        = string
+  default     = "0s"
+
+  validation {
+    condition     = can(regex("^[0-9]+[smh]$", var.readonly_for))
+    error_message = "readonly_for は数字 + s / m / h にすること（例: 0s）。"
+  }
+}
+
+variable "service_down_for" {
+  description = "docker compose を起動する unit が inactive / failed の状態がこの時間続いたら通知する（起動中の activating は含めない）"
+  type        = string
+  default     = "5m"
+
+  validation {
+    condition     = can(regex("^[0-9]+[smh]$", var.service_down_for))
+    error_message = "service_down_for は数字 + s / m / h にすること（例: 5m）。"
+  }
+}
+
+variable "container_down_for" {
+  description = "unit が active なのにコンテナが動いていない状態がこの時間続いたら通知する"
+  type        = string
+  default     = "5m"
+
+  validation {
+    condition     = can(regex("^[0-9]+[smh]$", var.container_down_for))
+    error_message = "container_down_for は数字 + s / m / h にすること（例: 5m）。"
+  }
+}
+
+variable "container_unhealthy_for" {
+  description = "コンテナのヘルスチェックが unhealthy の状態がこの時間続いたら通知する"
+  type        = string
+  default     = "5m"
+
+  validation {
+    condition     = can(regex("^[0-9]+[smh]$", var.container_unhealthy_for))
+    error_message = "container_unhealthy_for は数字 + s / m / h にすること（例: 5m）。"
+  }
+}
+
+variable "container_restarts" {
+  description = "コンテナが container_restarts_window の間にこの回数を超えて再起動したら通知する（restart ポリシーによる再起動）"
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.container_restarts >= 0
+    error_message = "container_restarts は 0 以上にすること。"
+  }
+}
+
+variable "container_restarts_window" {
+  description = "コンテナの再起動を数える期間"
+  type        = string
+  default     = "15m"
+
+  validation {
+    condition     = can(regex("^[0-9]+[mh]$", var.container_restarts_window))
+    error_message = "container_restarts_window は数字 + m / h にすること（例: 15m）。"
+  }
+}
+
+variable "container_metrics_stale_for" {
+  description = "コンテナの状態（compose-metrics.timer が書き出すファイル）がこの時間更新されなかったら通知する"
+  type        = string
+  default     = "5m"
+
+  # Pi が止まったときに「メトリクスが届かない」と重複しないよう、4 分以上にする（alerts.tf の container_metrics_stale_expr）
+  validation {
+    condition = (
+      can(regex("^[0-9]+[mh]$", var.container_metrics_stale_for)) &&
+      try(tonumber(regex("^[0-9]+", var.container_metrics_stale_for)) * (endswith(var.container_metrics_stale_for, "h") ? 3600 : 60) >= 240, false)
+    )
+    error_message = "container_metrics_stale_for は数字 + m / h で、4 分以上にすること（例: 5m）。"
+  }
+}

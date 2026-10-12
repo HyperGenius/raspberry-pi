@@ -11,6 +11,7 @@ slack_webhook_url = "https://hooks.slack.com/services/XXX/YYY/ZZZ"
 # prometheus_data_source_name = "grafanacloud-<stack>-prom"
 # instances                   = ["rpi-01"]
 # repeat_interval             = "4h"
+# mount_points                = { "rpi-01" = ["/", "/var/lib/docker", "/mnt/data", "/mnt/share"] }
 
 # 通知の確認では、しきい値を一時的に変えて apply する（例: CPU の温度を 30℃、継続時間を 0s）
 # cpu_temp_celsius = 30

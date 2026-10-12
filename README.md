@@ -33,7 +33,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）と、監視（Grafa
 │   ├── sftpgo/               # SFTPGo で USB のディレクトリを LAN に公開する（REST API / WebDAV / Web クライアント）
 │   ├── epgstation/           # Mirakurun + EPGStation でテレビ番組を録画する（PX-S1UD、ハードウェアエンコード）
 │   ├── plex/                 # Plex Media Server で USB のディレクトリを LAN に配信する
-│   ├── alloy/                # Grafana Alloy でメトリクス（容量・温度・CPU・メモリ）を Grafana Cloud に送る
+│   ├── alloy/                # Grafana Alloy でメトリクス（容量・温度・CPU・メモリ・サービスとコンテナの状態）を Grafana Cloud に送る
 │   └── common/               # 全台共通の初期設定
 └── terraform/
     └── grafana-cloud/        # Grafana Cloud のダッシュボード・アラート・Slack への通知（Terraform）
@@ -465,7 +465,7 @@ ssh -o HostKeyAlias=rpi-01 -i ~/.ssh/id_ed25519_rp4 -L 32400:127.0.0.1:32400 gen
 
 ## 監視（roles/alloy）
 
-[Grafana Alloy](https://grafana.com/docs/alloy/latest/) をホストに apt で導入し、ストレージの容量・CPU の温度・CPU・メモリの使用率を Grafana Cloud（無料枠）の Prometheus に送る。`monitoring` グループのホスト（`hosts.yml`）だけに適用する。ダッシュボード・アラート（Slack への通知）は Terraform で管理する（「ダッシュボード・アラート（terraform/grafana-cloud）」を参照）。
+[Grafana Alloy](https://grafana.com/docs/alloy/latest/) をホストに apt で導入し、ストレージの容量・CPU の温度・CPU・メモリの使用率と、docker compose のサービス・コンテナの状態を Grafana Cloud（無料枠）の Prometheus に送る。`monitoring` グループのホスト（`hosts.yml`）だけに適用する。ダッシュボード・アラート（Slack への通知）は Terraform で管理する（「ダッシュボード・アラート（terraform/grafana-cloud）」を参照）。
 
 | 構成 | 内容 |
 |---|---|
@@ -473,6 +473,8 @@ ssh -o HostKeyAlias=rpi-01 -i ~/.ssh/id_ed25519_rp4 -L 32400:127.0.0.1:32400 gen
 | `/etc/alloy/config.alloy` | Alloy の設定（収集 → ラベル付け → filesystem の絞り込み → 送信） |
 | `/etc/alloy/grafana-cloud-token` | Grafana Cloud のトークン（`root:alloy` の `0640`。`config.alloy` の `local.file` で読み込む） |
 | `/etc/systemd/system/alloy.service.d/10-raspberry-pi.conf` | ExecStart を置き換え、WAL を `/run/alloy/data`（tmpfs）に置き、UI を `127.0.0.1:12345` だけで待ち受ける |
+| `/usr/local/libexec/compose-metrics` | compose ファイルにあるコンテナの状態を `/run/compose-metrics/compose.prom`（tmpfs）に書き出す（`alloy_compose_units` があるときだけ） |
+| `/etc/systemd/system/compose-metrics.{service,timer}` | `compose-metrics` を 1 分ごとに root で実行する（`alloy_compose_units` があるときだけ） |
 
 | 変数 | 既定 | 内容 |
 |---|---|---|
@@ -483,6 +485,7 @@ ssh -o HostKeyAlias=rpi-01 -i ~/.ssh/id_ed25519_rp4 -L 32400:127.0.0.1:32400 gen
 | `alloy_scrape_interval` | `60s` | 収集の間隔（Grafana Cloud の 1 DPM に合わせる。短くしない） |
 | `alloy_collectors` | `cpu`, `meminfo`, `loadavg`, `filesystem`, `thermal_zone`, `hwmon`, `uname` | 有効にするコレクタ（ほかは無効） |
 | `alloy_filesystem_mount_points` | `/`, `/var/lib/docker`, `/mnt/data`, `/mnt/share` | 容量を送るマウント先（SD カードの p2・p3 と USB） |
+| `alloy_compose_units` | `[]`（`group_vars/monitoring` で、ホストが所属する sftpgo / epgstation / plex グループから決める） | docker compose を起動する unit。空でなければ `systemd`・`textfile` コレクタを加える |
 
 | 見たいもの | メトリクス |
 |---|---|
@@ -491,14 +494,22 @@ ssh -o HostKeyAlias=rpi-01 -i ~/.ssh/id_ed25519_rp4 -L 32400:127.0.0.1:32400 gen
 | 低電圧の警告 | `node_hwmon_in_lcrit_alarm_volts{chip="soc:firmware_raspberrypi_hwmon"}`（1 で低電圧） |
 | CPU 使用率 | `node_cpu_seconds_total` |
 | メモリ使用率 | `node_memory_MemAvailable_bytes` / `node_memory_MemTotal_bytes` |
+| マウントの状態 | `node_filesystem_readonly`（1 で読み取り専用。マウントされていなければ系列がない） |
+| サービスの状態 | `node_systemd_unit_state{name="sftpgo.service",state="active"}` など（`alloy_compose_units` の unit だけ） |
+| コンテナの状態 | `compose_container_up`（1 で running）・`compose_container_unhealthy`（1 で unhealthy）・`compose_container_restart_count`（`unit`・`project`・`service`・`container` ラベル） |
+| コンテナの状態の更新 | `node_textfile_mtime_seconds`・`node_textfile_scrape_error` |
 
 - **WAL を SD カードに書かない**: パッケージの ExecStart（`/usr/lib/alloy/alloy-wrapper`）は `--storage.path=/var/lib/alloy/data` を固定で付けるため、drop-in で `alloy run` を直接起動し、`/run/alloy/data`（tmpfs）に置く。サービスの再起動では消えないが（`RuntimeDirectoryPreserve`）、OS の再起動で未送信のデータとともに消える。rpi-01 では 1 分に約 130 系列で、WAL は数十 KB
 - USB のマウントは待たない（USB が外れても、SD カードの容量・温度などは送り続ける）
+- サービス（unit）の状態は `systemd` コレクタで送る。`unit_include` で `alloy_compose_units` だけに絞る（全 unit を送ると系列が増えるため、`alloy_collectors` には `systemd`・`textfile` を入れない）
+- unit は `Type=oneshot` + `RemainAfterExit=yes` なので、起動後にコンテナが落ちても active のまま。そのため、コンテナの状態は `compose-metrics` で別に送る。各 unit の `WorkingDirectory` で `docker compose config` を実行して動いているべきコンテナを決め、`docker container inspect` の状態と合わせて書き出す。compose down で削除されたコンテナや、Docker が止まっているときも 0（動いていない）になる。失敗したときはファイルを更新しない（Grafana の「コンテナの状態を取得できない」で通知される）
+- `compose-metrics` は 1 回あたり CPU を約 1 秒使う（大半は `docker compose config`）。rpi-01 では送る系列が約 40 増えた（unit 15・コンテナ 15・ほか）
 - exporter はマウント先を除外の正規表現でしか絞れないため、`prometheus.relabel` で `alloy_filesystem_mount_points` 以外の `node_filesystem_*` を捨てる（`/run`・`/tmp`・`/boot/firmware` などは送らない）
 - 匿名の利用統計の送信（`--disable-reporting`）は無効にしている
 - `config.alloy` は `alloy validate` で検証してから置く。drop-in・`config.alloy`・トークンを変更すると Alloy を再起動する
 - パッケージは hold し、`apt upgrade`（unattended-upgrades を含む）でバージョンが変わらないようにする。上げるときは `alloy_version` を変える
-- 最後に、Alloy の全コンポーネントが正常であること、`127.0.0.1:12345` 以外で待ち受けていないこと、WAL が tmpfs 上にあること、Grafana Cloud への送信に成功していること（`prometheus_remote_storage_samples_total` − `prometheus_remote_storage_samples_failed_total` が 0 より大きい）を確認する。トークンの誤り（401）などで送信できなければ失敗させる
+- `alloy_compose_units` の unit がなければ失敗させる（sftpgo などの role を先に実行する）。`alloy_compose_units` が空なら、`compose-metrics` の timer とファイルを削除する
+- 最後に、Alloy の全コンポーネントが正常であること、`127.0.0.1:12345` 以外で待ち受けていないこと、WAL が tmpfs 上にあること、`alloy_compose_units` のすべての unit とコンテナの状態が収集されていること、Grafana Cloud への送信に成功していること（`prometheus_remote_storage_samples_total` − `prometheus_remote_storage_samples_failed_total` が 0 より大きい）を確認する。トークンの誤り（401）などで送信できなければ失敗させる
 - `--check` では、Alloy が未インストールの場合はインストールの予定を表示してそこで止まる
 - 単独で実行する場合は `--tags alloy`（または `--tags monitoring`）
 
@@ -522,12 +533,13 @@ ansible-playbook playbooks/site.yml --limit rpi-01 --tags alloy --ask-vault-pass
 運用規約:
 
 - Grafana Cloud のトークンは `metrics:write` だけにする（読み取りや管理の権限を付けない）。Terraform（terraform/grafana-cloud）のトークンとは分ける
-- 容量を送るマウント先を増やすときは `alloy_filesystem_mount_points` に追加する（絞り込みを外して全部送らない）
+- 容量を送るマウント先を増やすときは `alloy_filesystem_mount_points` に追加する（絞り込みを外して全部送らない）。terraform/grafana-cloud の `mount_points` にも追加する
+- docker compose で動かす role を増やすときは、`group_vars/monitoring` の `alloy_compose_units` にグループを追加する
 - アプリのログの収集はこの role の対象外（別 Issue で扱う）
 
 ## ダッシュボード・アラート（terraform/grafana-cloud）
 
-roles/alloy が送るメトリクスのダッシュボードとアラートを、Grafana Cloud に [Terraform の Grafana プロバイダ](https://registry.terraform.io/providers/grafana/grafana/latest/docs)で作る。容量不足・高温・メモリ不足・低電圧・Pi の停止を Slack に通知する。Ansible の `grafana.grafana` コレクションにはアラートルールのモジュールがないため、Terraform を使う（`terraform plan` で差分を確認でき、コードから消したリソースは Grafana Cloud からも消える）。
+roles/alloy が送るメトリクスのダッシュボードとアラートを、Grafana Cloud に [Terraform の Grafana プロバイダ](https://registry.terraform.io/providers/grafana/grafana/latest/docs)で作る。容量不足・高温・メモリ不足・低電圧・Pi の停止・USB ストレージの未マウント・サービスとコンテナの停止を Slack に通知する。Ansible の `grafana.grafana` コレクションにはアラートルールのモジュールがないため、Terraform を使う（`terraform plan` で差分を確認でき、コードから消したリソースは Grafana Cloud からも消える）。
 
 | リソース | 内容 |
 |---|---|
@@ -543,6 +555,7 @@ roles/alloy が送るメトリクスのダッシュボードとアラートを�
 - CPU 使用率・メモリ使用率・CPU の温度（現在の値のゲージと推移）
 - 低電圧（表示している期間に `rpi_volt` の警告があったか）
 - ストレージ（`/`・`/var/lib/docker`・`/mnt/data`・`/mnt/share`）の使用率・空き容量・空き容量の推移
+- マウント・サービス・コンテナの状態の推移（state timeline。マウントの空白はマウントされていない期間）
 - ゲージの赤はアラートのしきい値（変数）に合わせる
 
 アラートルール（しきい値・継続時間は変数。Slack の通知文には summary のホスト名・マウント先・現在の値が入る）:
@@ -554,6 +567,13 @@ roles/alloy が送るメトリクスのダッシュボードとアラートを�
 | メモリの不足 | 使えるメモリ（`MemAvailable / MemTotal`）が 10% 未満の状態が 5 分続く | `memory_available_percent` / `memory_available_for` |
 | メトリクスが届かない | `instances` のホストのメトリクスが 10 分届かない（Pi の停止・ネットワーク断・Alloy の停止） | `instances` / `no_metrics_for` |
 | 低電圧 | `rpi_volt` の低電圧の警告（スロットリングの原因）を検知した | `undervoltage_for` |
+| マウントされていない | `mount_points` のマウント先のメトリクスが 5 分届かない（ホストのほかのメトリクスは届いている） | `mount_points` / `mount_missing_for` |
+| 読み取り専用のマウント | マウント先が読み取り専用になった（ext4 は I/O エラーで切り替わる） | `readonly_for` |
+| サービスの停止 | `alloy_compose_units` の unit が inactive / failed の状態が 5 分続く | `service_down_for` |
+| コンテナの停止 | unit が active なのに、compose ファイルにあるコンテナが動いていない状態が 5 分続く | `container_down_for` |
+| コンテナの異常 | コンテナのヘルスチェックが unhealthy の状態が 5 分続く | `container_unhealthy_for` |
+| コンテナの再起動の繰り返し | コンテナが 15 分に 2 回を超えて再起動した | `container_restarts` / `container_restarts_window` |
+| コンテナの状態を取得できない | `compose-metrics` のファイルが 5 分更新されない、または読み込めない | `container_metrics_stale_for` |
 
 | 変数 | 既定 | 内容 |
 |---|---|---|
@@ -564,9 +584,12 @@ roles/alloy が送るメトリクスのダッシュボードとアラートを�
 | `job` | `integrations/node_exporter` | `job` ラベル（roles/alloy の `alloy_job`） |
 | `instances` | `["rpi-01"]` | 停止を検知するホスト（roles/alloy を適用したホスト） |
 | `repeat_interval` | `4h` | 同じアラートを繰り返し通知する間隔 |
+| `mount_points` | `{ "rpi-01" = ["/", "/var/lib/docker", "/mnt/data", "/mnt/share"] }` | マウントされているべきマウント先（ホストごと。roles/alloy の `alloy_filesystem_mount_points` にそろえる） |
 
 - Pi が止まるとほかのルールはデータがなくなるが、通知は「メトリクスが届かない」だけにする（ほかのルールの `no_data_state` は `OK`）。クエリの失敗は `Error`（DatasourceError）として通知する
-- 「メトリクスが届かない」は `absent_over_time` で判定するため、ホストを `instances` に並べる（Alloy を適用したホストを増やしたら追加する）。USB が外れてマウント先のメトリクスが届かなくなった場合は、このルールでは検知しない
+- 「メトリクスが届かない」は `absent_over_time` で判定するため、ホストを `instances` に並べる（Alloy を適用したホストを増やしたら追加する）。USB が外れてマウント先のメトリクスが届かなくなった場合は「マウントされていない」で通知する
+- 「マウントされていない」は、同じ期間にそのホストの `node_uname_info` が届いているときだけ発火する。同じ scrape のサンプルなので、Pi 全体が止まったときは「メトリクスが届かない」だけが通知される。「コンテナの状態を取得できない」も、2 分以内に届いた値だけで判定し、Pi の停止とは重複させない
+- USB が外れると、マウント → unit（`RequiresMountsFor`）→ コンテナの順に止まる。「コンテナの停止」は unit が active のときだけ判定し、unit の停止は「サービスの停止」で通知する（起動中の activating はどちらも通知しない）
 - 高温によるスロットリング（85℃ から）は、その手前の「CPU の高温」で通知する
 - アラートはフォルダと名前でまとめて（`group_by`）、30 秒待ってから送る
 - Terraform で作ったアラートルール・通知先・通知ポリシーは画面では編集できない（provisioned）。ダッシュボードは画面で変えられるが、次の `apply` で戻る
@@ -592,7 +615,9 @@ terraform apply
 terraform plan    # 続けて実行すると差分がない（No changes）
 ```
 
-通知を確認するときは、`terraform.tfvars` でしきい値を一時的に変えて（例: `cpu_temp_celsius = 30`、`cpu_temp_for = "0s"`）`apply` すると Slack に通知が届き、戻して `apply` すると解決（Resolved）の通知が届く。`sudo systemctl stop alloy` で Alloy を止めると、10 分後に「メトリクスが届かない」が通知される。
+意図して止めるとき（メンテナンス・USB の交換など）は、先に Grafana の Alerting → Silences でサイレンスを作る（例: `instance=rpi-01` と `alertname=サービスの停止` など。期限付き）。サイレンスは Terraform では管理しない。止めたまま運用を続ける role は、`alloy_compose_units`（グループ）や `mount_points` から外す。
+
+通知を確認するときは、`terraform.tfvars` でしきい値を一時的に変えて（例: `cpu_temp_celsius = 30`、`cpu_temp_for = "0s"`）`apply` すると Slack に通知が届き、戻して `apply` すると解決（Resolved）の通知が届く。`sudo systemctl stop alloy` で Alloy を止めると、10 分後に「メトリクスが届かない」が通知される。`sudo docker stop sftpgo` で（unit は active のまま）コンテナを止めると「コンテナの停止」が、`sudo systemctl stop mnt-data.mount` で USB をアンマウントすると（依存しているサービスも止まる）「マウントされていない」と「サービスの停止」が通知される。
 
 運用規約:
 
