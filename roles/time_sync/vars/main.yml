@@ -1,0 +1,9 @@
+---
+# OS 同梱の設定（/usr/lib/systemd/timesyncd.conf.d/40-rpi-sync.conf）より後に読まれるよう、大きい番号の drop-in にする
+time_sync_timesyncd_dropin: /etc/systemd/timesyncd.conf.d/90-time-sync.conf
+
+# unit の drop-in のファイル名（/etc/systemd/system/<unit>.d/ に置く）。不要になったものはこの名前で探して削除する
+time_sync_unit_dropin_name: 90-time-sync.conf
+
+# systemd の時間（例: 90s / 5m / 2min / 1h）
+time_sync_timespan_regex: '^[0-9]+(us|ms|s|sec|m|min|h)?$'

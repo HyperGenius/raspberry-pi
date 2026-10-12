@@ -6,6 +6,10 @@ common_packages:
   - curl
   - htop
 
+# 起動時に、時刻の同期を待ってから起動する unit（roles/time_sync）。録画は時刻が正確であることが前提。
+# docker.service も待たせる（電源が落ちた後は、compose down されずに残ったコンテナを dockerd が epgstation.service より先に起動するため）
+time_sync_wait_units: "{{ ['docker.service', 'epgstation.service'] if 'epgstation' in group_names else [] }}"
+
 ansible_ssh_private_key_file: ~/.ssh/id_ed25519_rp4
 # ホスト鍵を IP ではなくホスト名で known_hosts に記録する（DHCP → 固定IP の切り替えや mDNS 名での接続でも同じ鍵で検証する）
 ansible_ssh_common_args: "-o HostKeyAlias={{ inventory_hostname }}"

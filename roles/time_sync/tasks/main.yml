@@ -1,0 +1,162 @@
+---
+# 実行順序: 設定の確認 → timesyncd の設定 → 起動時の同期待ち → 検証
+- name: Validate time_sync settings
+  ansible.builtin.assert:
+    that:
+      - time_sync_ntp_servers is not string and time_sync_ntp_servers | length > 0
+      - time_sync_fallback_ntp_servers is not string
+      - (time_sync_ntp_servers + time_sync_fallback_ntp_servers) | reject('match', '^[A-Za-z0-9.:-]+$') | list | length == 0
+      - time_sync_save_interval is match(time_sync_timespan_regex)
+      - time_sync_wait_timeout is match(time_sync_timespan_regex)
+      - time_sync_wait_units is not string
+      - time_sync_wait_units | reject('match', '^[A-Za-z0-9@_.:-]+\.(service|socket|mount|timer|target)$') | list | length == 0
+    fail_msg: >-
+      time_sync_ntp_servers（1 つ以上）・time_sync_fallback_ntp_servers はホスト名か IP アドレスのリスト、
+      time_sync_save_interval・time_sync_wait_timeout は systemd の時間（例: 5m / 2min。infinity は不可）、
+      time_sync_wait_units は unit 名（例: epgstation.service）のリストにすること
+    quiet: true
+
+# ---- timesyncd ----
+# 導入済み（Raspberry Pi OS の既定）。chrony などの別の時刻同期のデーモンとは同時に使えない
+- name: Install systemd-timesyncd
+  ansible.builtin.apt:
+    name: systemd-timesyncd
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create /etc/systemd/timesyncd.conf.d
+  ansible.builtin.file:
+    path: "{{ time_sync_timesyncd_dropin | dirname }}"
+    state: directory
+    mode: "0755"
+
+# パッケージの /etc/systemd/timesyncd.conf は編集しない
+- name: Configure the NTP servers
+  ansible.builtin.template:
+    src: timesyncd.conf.j2
+    dest: "{{ time_sync_timesyncd_dropin }}"
+    mode: "0644"
+  register: time_sync_timesyncd_conf
+  notify: Restart systemd-timesyncd
+
+- name: Start systemd-timesyncd
+  ansible.builtin.systemd_service:
+    name: systemd-timesyncd
+    enabled: true
+    state: started
+
+# ---- 起動時の同期待ち ----
+- name: Decide which units get the drop-ins
+  ansible.builtin.set_fact:
+    time_sync_dropin_units: "{{ (['systemd-time-wait-sync.service'] + time_sync_wait_units) if time_sync_wait_at_boot else [] }}"
+
+- name: Create the drop-in directories
+  ansible.builtin.file:
+    path: /etc/systemd/system/{{ item }}.d
+    state: directory
+    mode: "0755"
+  loop: "{{ time_sync_dropin_units }}"
+
+- name: Limit how long systemd-time-wait-sync waits
+  ansible.builtin.template:
+    src: time-wait-sync.conf.j2
+    dest: /etc/systemd/system/systemd-time-wait-sync.service.d/{{ time_sync_unit_dropin_name }}
+    mode: "0644"
+  when: time_sync_wait_at_boot
+  notify: Reload systemd
+
+# unit がまだなくてもよい（epgstation などの role より先に実行する）。After= は起動時にだけ効くため、unit は再起動しない
+- name: Start the units after time sync
+  ansible.builtin.template:
+    src: wait-unit.conf.j2
+    dest: /etc/systemd/system/{{ item }}.d/{{ time_sync_unit_dropin_name }}
+    mode: "0644"
+  loop: "{{ time_sync_wait_units if time_sync_wait_at_boot else [] }}"
+  notify: Reload systemd
+
+- name: Find the drop-ins of this role
+  ansible.builtin.find:
+    paths: /etc/systemd/system
+    patterns: "{{ time_sync_unit_dropin_name }}"
+    recurse: true
+    depth: 2
+  register: time_sync_dropins_found
+
+# time_sync_wait_units から外した unit（time_sync_wait_at_boot が false ならすべて）の drop-in を削除する
+- name: Remove the drop-ins no longer used
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: >-
+    {{
+      time_sync_dropins_found.files | map(attribute='path')
+      | reject('in', time_sync_dropin_units | map('regex_replace', '^', '/etc/systemd/system/')
+                                            | map('regex_replace', '$', '.d/' ~ time_sync_unit_dropin_name) | list)
+      | sort
+    }}
+  notify: Reload systemd
+
+# 起動時（sysinit.target）にだけ使うため、ここでは起動しない
+- name: Enable systemd-time-wait-sync
+  ansible.builtin.systemd_service:
+    name: systemd-time-wait-sync
+    enabled: "{{ time_sync_wait_at_boot }}"
+
+- name: Apply the changes before verifying
+  ansible.builtin.meta: flush_handlers
+
+# ---- 検証 ----
+# --check で NTP サーバーの設定を変更する予定がある場合は、まだ反映されていないので検証しない
+- name: Verify time sync
+  when: not (ansible_check_mode and time_sync_timesyncd_conf is changed)
+  block:
+    - name: Read the NTP servers timesyncd uses
+      ansible.builtin.command: timedatectl show-timesync --all -p {{ item }} --value
+      loop: [SystemNTPServers, FallbackNTPServers]
+      register: time_sync_servers_live
+      changed_when: false
+      check_mode: false  # 読み取りのみ
+
+    - name: Fail unless timesyncd uses the NTP servers
+      ansible.builtin.assert:
+        that:
+          - time_sync_servers_live.results[0].stdout == time_sync_ntp_servers | join(' ')
+          - time_sync_servers_live.results[1].stdout == time_sync_fallback_ntp_servers | join(' ')
+        fail_msg: >-
+          timesyncd の NTP サーバーが設定と違う（NTP: {{ time_sync_servers_live.results[0].stdout or 'なし' }} /
+          FallbackNTP: {{ time_sync_servers_live.results[1].stdout or 'なし' }}）。
+          ls /etc/systemd/timesyncd.conf.d /usr/lib/systemd/timesyncd.conf.d で他の drop-in を確認すること
+        quiet: true
+
+    # timesyncd の再起動直後は、NTP サーバーの応答を受け取るまで NTPMessage が空になる
+    - name: Wait for an NTP server to answer
+      ansible.builtin.command: timedatectl show-timesync --all -p NTPMessage --value
+      register: time_sync_ntp_message
+      until: time_sync_ntp_message.stdout != ''
+      retries: 12
+      delay: 5
+      changed_when: false
+      check_mode: false  # 読み取りのみ
+
+    - name: Wait for the clock to be synchronized
+      ansible.builtin.command: timedatectl show -p NTPSynchronized --value
+      register: time_sync_synchronized
+      until: time_sync_synchronized.stdout == 'yes'
+      retries: 12
+      delay: 5
+      changed_when: false
+      check_mode: false  # 読み取りのみ
+
+    - name: Read the NTP server in use
+      ansible.builtin.command: timedatectl show-timesync --all -p ServerName --value
+      register: time_sync_server_name
+      changed_when: false
+      check_mode: false  # 読み取りのみ
+
+    # NTP= のサーバーが一時的に使えず FallbackNTP= に切り替わっていることもあるため、どちらかであればよい
+    - name: Fail unless the NTP server in use is one of the configured servers
+      ansible.builtin.assert:
+        that: time_sync_server_name.stdout in time_sync_ntp_servers + time_sync_fallback_ntp_servers
+        fail_msg: "設定にない NTP サーバー（{{ time_sync_server_name.stdout or 'なし' }}）と同期している"
+        success_msg: "{{ time_sync_server_name.stdout }} と同期している"

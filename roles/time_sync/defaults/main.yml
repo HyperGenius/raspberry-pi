@@ -1,0 +1,23 @@
+---
+# 使う NTP サーバー（timesyncd の NTP=）。応答がなければ次のサーバー・アドレスに切り替える
+time_sync_ntp_servers:
+  - ntp.nict.jp
+
+# NTP= のサーバーがすべて使えないときのサーバー（FallbackNTP=）。Debian の既定と同じ
+time_sync_fallback_ntp_servers:
+  - 0.debian.pool.ntp.org
+  - 1.debian.pool.ntp.org
+  - 2.debian.pool.ntp.org
+  - 3.debian.pool.ntp.org
+
+# 時刻を /var/lib/systemd/timesync/clock（mtime）に保存する間隔（SaveIntervalSec=）。RTC がないため、起動直後の時刻は
+# 最後に保存した時刻から始まる。Raspberry Pi OS の既定（/usr/lib/systemd/timesyncd.conf.d/40-rpi-sync.conf）と同じ
+time_sync_save_interval: 5m
+
+# 起動時に、時刻が同期されるまで time-sync.target を待たせる（systemd-time-wait-sync.service を有効にする）
+time_sync_wait_at_boot: true
+# 同期を待つ上限（infinity は不可）。超えると systemd-time-wait-sync.service は failed になり、待っていた unit は同期前の時刻で起動する
+time_sync_wait_timeout: 2min
+# 同期を待ってから起動する unit（After= / Wants=time-sync.target の drop-in を置く）。
+# OnCalendar の timer（apt-daily.timer など）は systemd が自動で time-sync.target の後にする
+time_sync_wait_units: []

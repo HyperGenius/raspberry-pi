@@ -1,0 +1,9 @@
+# {{ ansible_managed }}
+# パッケージの /etc/systemd/timesyncd.conf と Raspberry Pi OS の 40-rpi-sync.conf より後に読まれる。
+# NTP= / FallbackNTP= は複数のファイルの値が足し合わされるため、空の代入で一度リセットしてから指定する
+[Time]
+NTP=
+NTP={{ time_sync_ntp_servers | join(' ') }}
+FallbackNTP=
+FallbackNTP={{ time_sync_fallback_ntp_servers | join(' ') }}
+SaveIntervalSec={{ time_sync_save_interval }}
