@@ -19,12 +19,22 @@ usb_storage_devices:
     fstype: ext4
     path: /mnt/share
 
-# SFTPGo（roles/sftpgo）。/mnt/data/encoded を LAN に公開する。パスワードのハッシュは vault に置く
+# SFTPGo（roles/sftpgo）。/mnt/data/encoded を / に、/mnt/share を /share に公開する。パスワードのハッシュは vault に置く
 sftpgo_allowed_networks:
   - 192.168.10.0/24
+sftpgo_folders:
+  share: /mnt/share
 sftpgo_users:
   # スクリプト用。一覧・取得・アップロードのみ（上書き・削除・リネームは不可）
   - name: client
     password_hash: "{{ vault_sftpgo_client_password_hash }}"
     permissions:
       /: [list, download, upload, create_dirs]
+  # 人が使う。/share（/mnt/share）は全権限、/（/mnt/data/encoded）は読み取りのみ
+  - name: genius
+    password_hash: "{{ vault_sftpgo_genius_password_hash }}"
+    permissions:
+      /: [list, download]
+      /share: ["*"]
+    virtual_folders:
+      /share: share

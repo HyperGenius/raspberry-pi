@@ -7,11 +7,21 @@
       "status": 1,
       "home_dir": {{ sftpgo_container_share_dir | to_json }},
       "permissions": {{ user.permissions | to_json }},
+      "virtual_folders": [
+{% for vpath, name in (user.virtual_folders | default({})).items() %}
+        {"name": {{ name | to_json }}, "virtual_path": {{ vpath | to_json }}}{{ ',' if not loop.last else '' }}
+{% endfor %}
+      ],
       "filters": {
         "allowed_ip": {{ user.allowed_networks | default(sftpgo_allowed_networks) | to_json }},
         "web_client": {{ sftpgo_web_client_disabled | to_json }}
       }
     }{{ ',' if not loop.last else '' }}
+{% endfor %}
+  ],
+  "folders": [
+{% for name in sftpgo_folders %}
+    {"name": {{ name | to_json }}, "mapped_path": {{ (sftpgo_container_folders_dir ~ '/' ~ name) | to_json }}}{{ ',' if not loop.last else '' }}
 {% endfor %}
   ],
   "admins": [

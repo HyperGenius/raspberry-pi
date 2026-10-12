@@ -32,6 +32,13 @@ services:
         target: {{ sftpgo_container_share_dir }}
         bind:
           create_host_path: false
+{% for name, path in sftpgo_folders.items() %}
+      - type: bind
+        source: {{ path }}
+        target: {{ sftpgo_container_folders_dir }}/{{ name }}
+        bind:
+          create_host_path: false
+{% endfor %}
       # multipart のアップロードは /tmp に一時ファイルを作る（コンテナのレイヤー = SD カードに書かない）
       - type: bind
         source: {{ sftpgo_tmp_dir }}
