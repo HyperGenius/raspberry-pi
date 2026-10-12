@@ -5,3 +5,11 @@
 
 # ansible-vault の秘密情報（公開リポジトリのため暗号化済みでも含めない）
 vault.yml
+
+# Terraform（state・tfvars に Grafana Cloud のトークンや Slack の Webhook URL が含まれる。.terraform.lock.hcl はコミットする）
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+*.tfvars
+crash.log
