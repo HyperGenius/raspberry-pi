@@ -2,6 +2,7 @@
 # TF_VAR_grafana_url などの環境変数で渡してもよい
 
 # 秘密情報（README の「事前準備」を参照）
+# grafana_url はブラウザで Grafana を開く URL。Alloy の送信先（https://prometheus-prod-...grafana.net）ではない
 grafana_url       = "https://<stack>.grafana.net"
 grafana_auth      = "glsa_..."
 slack_webhook_url = "https://hooks.slack.com/services/XXX/YYY/ZZZ"

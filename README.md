@@ -574,7 +574,7 @@ roles/alloy が送るメトリクスのダッシュボードとアラートを�
 
 事前準備（初回だけ。スタックは roles/alloy の事前準備で作ったものを使う。Terraform では管理しない）:
 
-1. Grafana Cloud のスタック（`https://<stack>.grafana.net`）の Administration → Users and access → Service accounts で、Terraform 専用のサービスアカウント（Role は Admin）を作り、「Add service account token」でトークン（`glsa_...`）を発行する
+1. Grafana Cloud のスタック（`https://<stack>.grafana.net`。ブラウザで Grafana を開く URL で、roles/alloy の送信先の `https://prometheus-prod-...grafana.net` ではない）の Administration → Users and access → Service accounts で、Terraform 専用のサービスアカウント（Role は Admin）を作り、「Add service account token」でトークン（`glsa_...`）を発行する
 2. Slack で通知を送るチャンネルの Incoming Webhook を作り、URL（`https://hooks.slack.com/services/...`）を控える
 3. Terraform（1.14 系）をインストールする（`brew install terraform` など）
 4. `terraform.tfvars` を作る（`TF_VAR_grafana_url` などの環境変数で渡してもよい）

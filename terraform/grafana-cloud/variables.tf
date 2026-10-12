@@ -1,12 +1,15 @@
 # ---- 認証・秘密情報（terraform.tfvars か TF_VAR_* で渡す。値は Git に含めない）----
 variable "grafana_url" {
-  description = "Grafana Cloud のスタックの URL（https://<stack>.grafana.net）"
+  description = "Grafana Cloud のスタックの URL（https://<stack>.grafana.net。ブラウザで Grafana を開く URL で、Prometheus の送信先ではない）"
   type        = string
   sensitive   = true
 
   validation {
-    condition     = can(regex("^https://[a-z0-9-]+\\.grafana\\.net/?$", var.grafana_url))
-    error_message = "grafana_url は https://<stack>.grafana.net にすること。"
+    condition = (
+      can(regex("^https://[a-z0-9-]+\\.grafana\\.net/?$", var.grafana_url)) &&
+      !can(regex("^https://(prometheus|logs|tempo|profiles|otlp-gateway)-", var.grafana_url))
+    )
+    error_message = "grafana_url は Grafana のスタックの URL（https://<stack>.grafana.net）にすること。Prometheus などの送信先（https://prometheus-prod-...grafana.net）ではない。"
   }
 }
 
