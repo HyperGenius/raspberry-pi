@@ -1,0 +1,240 @@
+---
+# 実行順序: 設定の検証 → 実行前チェック → apt リポジトリ → インストール → drop-in・トークン・config.alloy →（handler で反映）→ 検証
+- name: Validate alloy settings
+  ansible.builtin.assert:
+    that:
+      - alloy_remote_write_url is match('^https://[^/]+/api/prom/push$')
+      - alloy_remote_write_username | string is match('^[0-9]+$')
+      - alloy_remote_write_token | length > 0
+      - alloy_instance | length > 0
+      - alloy_scrape_interval is match('^[0-9]+[sm]$')
+      - "'filesystem' in alloy_collectors"
+      - alloy_filesystem_mount_points | length > 0
+      - alloy_filesystem_mount_points | reject('match', '^/([^/].*[^/])?$') | list | length == 0
+    fail_msg: >-
+      alloy_remote_write_url は Grafana Cloud の Prometheus の remote_write の URL（https://.../api/prom/push）、
+      alloy_remote_write_username はインスタンス ID（数字）にし、alloy_remote_write_token を設定すること（vault の項目は vault.yml.example を参照）。
+      alloy_scrape_interval は数字 + s / m（例: 60s）、alloy_collectors には filesystem を含め、
+      alloy_filesystem_mount_points は絶対パス（末尾の / なし）を 1 つ以上にすること
+    quiet: true
+
+# ---- 実行前チェック（何も変更する前に確認する）----
+- name: Read the dpkg architecture
+  ansible.builtin.command: dpkg --print-architecture
+  register: alloy_dpkg_arch
+  changed_when: false
+  check_mode: false  # 読み取りのみ
+
+- name: Fail unless the OS is 64-bit Debian
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Debian'
+      - alloy_dpkg_arch.stdout in ['arm64', 'amd64']
+    fail_msg: "64bit の Debian 系（Raspberry Pi OS 64bit）を前提にしている（{{ ansible_facts['distribution'] }} / {{ alloy_dpkg_arch.stdout }}）"
+    quiet: true
+
+# ---- apt リポジトリ ----
+- name: Download the Grafana apt key
+  ansible.builtin.get_url:
+    url: "{{ alloy_apt_repo_url }}/gpg.key"
+    dest: /etc/apt/keyrings/grafana.asc
+    mode: "0644"
+  register: alloy_apt_key
+
+- name: Add the Grafana apt repository
+  ansible.builtin.template:
+    src: grafana.sources.j2
+    dest: /etc/apt/sources.list.d/grafana.sources
+    mode: "0644"
+  register: alloy_apt_repo
+
+# hold していると Status は hold ok installed になる
+- name: Check whether Alloy is installed
+  ansible.builtin.command: dpkg-query -W -f ${Status} alloy
+  register: alloy_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false  # 読み取りのみ
+
+# リポジトリを追加していない --check では apt がパッケージを見つけられず、以降のタスクも alloy ユーザー・alloy.service を必要とする
+- name: Stop here in check mode if Alloy would be installed
+  when: >-
+    ansible_check_mode and
+    (not alloy_installed.stdout.endswith(' ok installed') or alloy_apt_key is changed or alloy_apt_repo is changed)
+  block:
+    - name: Show the planned changes
+      ansible.builtin.debug:
+        msg: "Alloy {{ alloy_version }} をインストールする。drop-in・config.alloy・検証はインストール後に確認できる"
+
+    - name: End the role (the following tasks need Alloy)
+      ansible.builtin.meta: end_role
+
+# ---- インストール ----
+- name: Update the apt cache
+  ansible.builtin.apt:
+    update_cache: true
+  when: alloy_apt_key is changed or alloy_apt_repo is changed
+
+# apt upgrade（unattended-upgrades を含む）でバージョンが変わらないよう hold する。上げるときは alloy_version を変える。
+# パッケージの設定ファイル（config.alloy）は role が書き換えるが、apt モジュールの既定（--force-confold）で上書きされない
+- name: Install Alloy {{ alloy_version }}
+  ansible.builtin.apt:
+    name: alloy={{ alloy_version }}-*
+    state: present
+    allow_change_held_packages: true
+    update_cache: true
+    cache_valid_time: 3600
+  register: alloy_package
+  notify: Restart alloy
+
+- name: Hold the Alloy package
+  ansible.builtin.dpkg_selections:
+    name: alloy
+    selection: hold
+
+# ---- systemd の drop-in（WAL を tmpfs に置き、UI を 127.0.0.1 だけで待ち受ける）----
+- name: Create {{ alloy_dropin_dir }}
+  ansible.builtin.file:
+    path: "{{ alloy_dropin_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Replace the ExecStart of alloy.service
+  ansible.builtin.template:
+    src: 10-raspberry-pi.conf.j2
+    dest: "{{ alloy_dropin }}"
+    mode: "0644"
+  register: alloy_dropin_file
+  notify:
+    - Reload systemd
+    - Restart alloy
+
+# ---- 設定 ----
+# config.alloy に平文で書かないよう別のファイルにし、alloy ユーザー（グループ）だけが読めるようにする。diff にも出さない
+- name: Write the Grafana Cloud token
+  ansible.builtin.copy:
+    content: "{{ alloy_remote_write_token }}"
+    dest: "{{ alloy_token_file }}"
+    owner: root
+    group: alloy
+    mode: "0640"
+  diff: false
+  register: alloy_token
+  notify: Restart alloy
+
+- name: Write config.alloy
+  ansible.builtin.template:
+    src: config.alloy.j2
+    dest: "{{ alloy_config_file }}"
+    owner: root
+    group: alloy
+    mode: "0640"
+    validate: alloy validate %s
+  register: alloy_config
+  notify: Restart alloy
+
+- name: Apply the changes before starting
+  ansible.builtin.meta: flush_handlers
+
+- name: Start Alloy
+  ansible.builtin.systemd_service:
+    name: alloy
+    enabled: true
+    state: started
+  register: alloy_service
+
+# ---- 検証 ----
+# --check で変更する予定の場合は、まだ反映されていないので検証しない
+- name: Verify Alloy
+  when: >-
+    not (ansible_check_mode and
+         (alloy_package is changed or alloy_dropin_file is changed or alloy_token is changed or alloy_config is changed or
+          alloy_service is changed))
+  vars:
+    # samples_total は失敗したサンプルも含む（送信に成功した数 = samples_total - samples_failed_total）
+    alloy_samples_regex: '(?m)^prometheus_remote_storage_samples_total\{[^}]*\} (\S+)$'
+    alloy_failed_regex: '(?m)^prometheus_remote_storage_samples_failed_total\{[^}]*\} (\S+)$'
+  block:
+    - name: Wait until Alloy is ready
+      ansible.builtin.uri:
+        url: http://{{ alloy_listen_addr }}/-/ready
+      register: alloy_ready
+      until: alloy_ready.status == 200
+      retries: 15
+      delay: 2
+      check_mode: false  # 読み取りのみ
+
+    - name: Read the components
+      ansible.builtin.uri:
+        url: http://{{ alloy_listen_addr }}/api/v0/web/components
+        return_content: true
+      register: alloy_components
+      check_mode: false  # 読み取りのみ
+
+    # Content-Type が text/plain のため、JSON として読み直す
+    - name: Set the unhealthy components
+      ansible.builtin.set_fact:
+        alloy_unhealthy: "{{ alloy_components.content | from_json | rejectattr('health.state', 'eq', 'healthy') | list }}"
+
+    - name: Fail unless all components are healthy
+      ansible.builtin.assert:
+        that: alloy_unhealthy | length == 0
+        fail_msg: >-
+          Alloy のコンポーネントが正常でない（{{ alloy_unhealthy | map(attribute='localID') | join(', ') }}）。
+          journalctl -u alloy でエラーを確認すること
+        quiet: true
+
+    # LAN に公開していない（127.0.0.1 以外で待ち受けていない）
+    - name: Find the addresses Alloy listens on
+      ansible.builtin.command: ss -Hltnp
+      register: alloy_listen
+      changed_when: false
+      check_mode: false  # 読み取りのみ
+
+    - name: Fail unless Alloy listens only on {{ alloy_listen_addr }}
+      ansible.builtin.assert:
+        that: >-
+          alloy_listen.stdout_lines | select('search', '"alloy"') | map('split') | map(attribute=3) | list
+          == [alloy_listen_addr]
+        fail_msg: >-
+          Alloy が {{ alloy_listen_addr }} 以外でも待ち受けている（{{ alloy_listen.stdout_lines | select('search', '"alloy"')
+          | map('split') | map(attribute=3) | join(', ') }}）
+        quiet: true
+
+    # WAL が SD カードではなく tmpfs にある
+    - name: Find the filesystem of the WAL
+      ansible.builtin.command: findmnt -n -o FSTYPE --target {{ alloy_storage_path }}/prometheus.remote_write.{{ alloy_remote_write_name }}
+      register: alloy_wal_fstype
+      changed_when: false
+      failed_when: false
+      check_mode: false  # 読み取りのみ
+
+    - name: Fail unless the WAL is on tmpfs
+      ansible.builtin.assert:
+        that: alloy_wal_fstype.stdout == 'tmpfs'
+        fail_msg: >-
+          WAL（{{ alloy_storage_path }}/prometheus.remote_write.{{ alloy_remote_write_name }}）が tmpfs 上にない
+          （{{ alloy_wal_fstype.stdout or alloy_wal_fstype.stderr }}）。drop-in（{{ alloy_dropin }}）が反映されているか確認すること
+        quiet: true
+
+    # 認証の失敗などの再送しないエラーでは、サンプルは失敗として数えて捨てられる。
+    # 起動直後は最初の収集（最大 alloy_scrape_interval）と送信を待つ
+    - name: Wait until Alloy has sent samples to Grafana Cloud
+      ansible.builtin.uri:
+        url: http://{{ alloy_listen_addr }}/metrics
+        return_content: true
+      register: alloy_metrics
+      until: alloy_metrics.content | regex_findall(alloy_samples_regex) | map('float') | sum > 0
+      retries: 30
+      delay: 5
+      check_mode: false  # 読み取りのみ
+
+    - name: Fail unless Alloy has sent samples to Grafana Cloud
+      ansible.builtin.assert:
+        that: >-
+          (alloy_metrics.content | regex_findall(alloy_samples_regex) | map('float') | sum) -
+          (alloy_metrics.content | regex_findall(alloy_failed_regex) | map('float') | sum) > 0
+        fail_msg: >-
+          Grafana Cloud への送信に失敗している。alloy_remote_write_url・alloy_remote_write_username・トークン（vault）を確認すること
+          （journalctl -u alloy でエラーを確認できる）
+        quiet: true

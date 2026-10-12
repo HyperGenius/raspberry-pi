@@ -13,3 +13,10 @@ vault_sftpgo_client_password_hash: "$6$..."
 
 # EPGStation（roles/epgstation）の DB（MariaDB）のパスワード。8 文字以上。DB の初期化時にだけ使われる
 vault_epgstation_db_password: "your-db-password"
+
+# Grafana Cloud（roles/alloy）の Prometheus の remote_write の送信先と認証。group_vars/monitoring から参照する
+#   URL・ユーザー: grafana.com の My Account → スタック → Prometheus の「Details」の Remote Write Endpoint・Username / Instance ID
+#   トークン: Cloud access policy（Realm はスタック、スコープは metrics:write だけ）の「Add token」で発行する
+vault_grafana_cloud_prometheus_url: "https://prometheus-prod-XX-prod-XX-XXXX-X.grafana.net/api/prom/push"
+vault_grafana_cloud_prometheus_username: "1234567"
+vault_grafana_cloud_metrics_token: "glc_..."

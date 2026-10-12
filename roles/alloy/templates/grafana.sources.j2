@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+Types: deb
+URIs: {{ alloy_apt_repo_url }}
+Suites: stable
+Components: main
+Architectures: {{ alloy_dpkg_arch.stdout }}
+Signed-By: /etc/apt/keyrings/grafana.asc

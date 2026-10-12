@@ -83,3 +83,18 @@
     # docker・usb_storage の後に実行する（/mnt/data が USB の ext4 でなければ何もせずに失敗する）
     - role: plex
       tags: [plex]
+
+# Grafana Alloy でメトリクスを Grafana Cloud に送る（monitoring グループのホストだけ）。
+# Grafana Cloud のトークンを vault から読み込むため --ask-vault-pass が必要
+- name: Send metrics to Grafana Cloud with Alloy
+  hosts: monitoring
+  become: true
+  pre_tasks:
+    - name: Load the secrets
+      ansible.builtin.include_vars:
+        file: "{{ inventory_dir }}/vault.yml"
+      tags: [alloy, monitoring]
+  roles:
+    # Docker・USB には依存しない（usb_storage・sd_partition の後に実行すると、すべてのマウント先の容量を送れる）
+    - role: alloy
+      tags: [alloy, monitoring]

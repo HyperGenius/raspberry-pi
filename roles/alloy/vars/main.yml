@@ -1,0 +1,18 @@
+---
+alloy_config_file: /etc/alloy/config.alloy
+# Grafana Cloud のトークン（root:alloy の 0640。config.alloy の local.file で読み込む）
+alloy_token_file: /etc/alloy/grafana-cloud-token
+
+# パッケージの ExecStart を置き換える systemd の drop-in
+alloy_dropin_dir: /etc/systemd/system/alloy.service.d
+alloy_dropin: "{{ alloy_dropin_dir }}/10-raspberry-pi.conf"
+
+# WAL などの置き場所。SD カードに書かないよう tmpfs（/run）に置く（drop-in の RuntimeDirectory で /run/alloy を作る）
+alloy_runtime_dir: /run/alloy
+alloy_storage_path: "{{ alloy_runtime_dir }}/data"
+
+# Alloy の UI・API（LAN には公開しない）
+alloy_listen_addr: 127.0.0.1:12345
+
+# config.alloy の prometheus.remote_write のラベル（WAL のディレクトリ名・メトリクスのラベルになる）
+alloy_remote_write_name: grafana_cloud
