@@ -28,8 +28,8 @@ sftpgo_sftp_port: 0        # SFTP。22 は OS の sshd が使う
 sftpgo_allowed_networks: []
 
 # ユーザーの一覧（値は host_vars で定義し、パスワードのハッシュは vault に置く）。ここにないユーザーはログインできない
-#   - name: client
-#     password_hash: "{{ vault_sftpgo_client_password_hash }}"  # openssl passwd -6 で生成
+#   - name: user1
+#     password_hash: "{{ vault_sftpgo_user1_password_hash }}"  # openssl passwd -6 で生成
 #     permissions:              # パスごとの権限（SFTPGo の permissions。"*" は全権限）
 #       /: [list, download, upload]
 #       /share: ["*"]           # virtual_folders の仮想パスの権限は必ず書く（書かないと / の権限を引き継ぐ）

@@ -19,18 +19,26 @@ usb_storage_devices:
     fstype: ext4
     path: /mnt/share
 
-# SFTPGo（roles/sftpgo）。/mnt/data/encoded と /mnt/share を LAN に公開する。パスワードのハッシュは vault に置く
+# SFTPGo（roles/sftpgo）。/mnt/data/recorded・/mnt/data/encoded・/mnt/share を LAN に公開する。パスワードのハッシュは vault に置く
 sftpgo_allowed_networks:
   - 192.168.10.0/24
 sftpgo_folders:
+  recorded: /mnt/data/recorded
   data: /mnt/data/encoded
   share: /mnt/share
 sftpgo_users:
-  # スクリプト用。一覧・取得・アップロードのみ（上書き・削除・リネームは不可）
-  - name: client
-    password_hash: "{{ vault_sftpgo_client_password_hash }}"
+  # エンコード用 PC。録画データ（/recorded）を取得して削除し（移動）、エンコードしたファイルを /encoded に追加する。
+  # 録画中のファイルは PC 側で EPGStation の API を見て除外する（SFTPGo からは区別できない）
+  - name: encoder
+    password_hash: "{{ vault_sftpgo_encoder_password_hash }}"
+    root: empty
     permissions:
-      /: [list, download, upload, create_dirs]
+      /: [list]
+      /recorded: [list, download, delete]
+      /encoded: [list, upload, create_dirs]
+    virtual_folders:
+      /recorded: recorded
+      /encoded: data
   # 人が使う。/ には data（/mnt/data/encoded。読み取りのみ）と share（/mnt/share。全権限）だけを表示する
   - name: genius
     password_hash: "{{ vault_sftpgo_genius_password_hash }}"

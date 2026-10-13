@@ -305,16 +305,23 @@ journalctl -b -o short-monotonic -u systemd-timesyncd -u systemd-time-wait-sync 
 ```yaml
 sftpgo_allowed_networks: [192.168.10.0/24]
 sftpgo_folders:
+  recorded: /mnt/data/recorded
   data: /mnt/data/encoded
   share: /mnt/share
 sftpgo_users:
-  - name: client
-    password_hash: "{{ vault_sftpgo_client_password_hash }}"  # openssl passwd -6 で生成し、vault に置く
+  - name: encoder
+    password_hash: "{{ vault_sftpgo_encoder_password_hash }}"  # openssl passwd -6 で生成し、vault に置く
+    root: empty           # / を空にして、virtual_folders（recorded と encoded）だけを表示する
     permissions:          # パスごとの権限（SFTPGo の permissions）
-      /: [list, download, upload, create_dirs]
+      /: [list]
+      /recorded: [list, download, delete]
+      /encoded: [list, upload, create_dirs]
+    virtual_folders:      # 仮想パス: sftpgo_folders の名前
+      /recorded: recorded
+      /encoded: data
   - name: genius
     password_hash: "{{ vault_sftpgo_genius_password_hash }}"
-    root: empty           # / を空にして、virtual_folders（data と share）だけを表示する
+    root: empty
     permissions:
       /: [list]
       /data: [list, download]
@@ -340,32 +347,37 @@ sftpgo_users:
 
 ```sh
 openssl passwd -6                                  # パスワードのハッシュを生成
-ansible-vault edit inventories/home/vault.yml      # vault_sftpgo_client_password_hash などを追加
+ansible-vault edit inventories/home/vault.yml      # vault_sftpgo_encoder_password_hash などを追加
 ansible-playbook playbooks/site.yml --limit rpi-01 --tags sftpgo --ask-vault-pass
 ```
 
-クライアントからの使い方（`client` ユーザーの場合）:
+エンコード用 PC からの使い方（`encoder` ユーザー）。録画データを取得したら削除し（移動）、エンコードしたファイルを `/encoded` に追加する:
 
 ```sh
 B=http://192.168.10.55:8080
 
 # トークン（20 分有効）を取得する
-T=$(curl -s -u client:PASSWORD $B/api/v2/user/token | jq -r .access_token)
+T=$(curl -s -u encoder:PASSWORD $B/api/v2/user/token | jq -r .access_token)
 
-# 一覧
-curl -s -H "Authorization: Bearer $T" "$B/api/v2/user/dirs?path=/カネオくん" | jq
+# 録画データの一覧
+curl -s -H "Authorization: Bearer $T" "$B/api/v2/user/dirs?path=/recorded" | jq
 
-# 取得（Range に対応するので -C - で再開できる）
-curl -H "Authorization: Bearer $T" -o out.mp4 "$B/api/v2/user/files?path=/カネオくん/xxx.mp4"
+# 取得（Range に対応するので -C - で再開できる）→ サイズを確かめてから削除する
+curl -H "Authorization: Bearer $T" -o xxx.m2ts "$B/api/v2/user/files?path=/recorded/xxx.m2ts"
+curl -X DELETE -H "Authorization: Bearer $T" "$B/api/v2/user/files?path=/recorded/xxx.m2ts"
 
-# アップロード（本文をそのまま送る）
-curl -H "Authorization: Bearer $T" --data-binary @file.mp4 "$B/api/v2/user/files/upload?path=/uploads/file.mp4"
+# エンコードしたファイルのアップロード（本文をそのまま送る。mkdir_parents でディレクトリも作る。同じ名前のファイルがあれば失敗する）
+curl -H "Authorization: Bearer $T" --data-binary @xxx.mp4 "$B/api/v2/user/files/upload?path=/encoded/カネオくん/xxx.mp4&mkdir_parents=true"
 ```
+
+- **録画中のファイルは取得・削除しない。** SFTPGo からは EPGStation が書き込み中かどうかを区別できない（取得すると途中までのファイルになり、削除すると録画が失われる）。PC 側で EPGStation の API（`GET http://192.168.10.55:8888/api/recording`）を見て、録画中のファイルを除外する
+- SFTPGo で削除した録画は、EPGStation の録画一覧にファイルのない録画として残る（許容している）
+- `/encoded` には上書き・削除の権限がない（どのユーザーにもない）。誤ってアップロードしたファイルは Pi 上で消す
 
 - API の仕様: `http://192.168.10.55:8080/openapi/`（Swagger UI）
 - ブラウザ: `http://192.168.10.55:8080/`（Web クライアント）
 - WebDAV: `http://192.168.10.55:10080/`（Finder の「サーバへ接続」など）
-- `genius` ユーザーでは、`/` に `data`（`/mnt/data/encoded`）と `share`（`/mnt/share`）が表示される。Windows のエクスプローラーは HTTP の WebDAV で Basic 認証を使わない（既定の設定）ため、WinSCP（プロトコルに WebDAV を選ぶ）や rclone、ブラウザの Web クライアントを使う
+- `encoder` ユーザーでは、`/` に `recorded`（`/mnt/data/recorded`）と `encoded`（`/mnt/data/encoded`）が表示される。`genius` ユーザーでは、`/` に `data`（`/mnt/data/encoded`）と `share`（`/mnt/share`）が表示される。Windows のエクスプローラーは HTTP の WebDAV で Basic 認証を使わない（既定の設定）ため、WinSCP（プロトコルに WebDAV を選ぶ）や rclone、ブラウザの Web クライアントを使う
 
 運用規約:
 
