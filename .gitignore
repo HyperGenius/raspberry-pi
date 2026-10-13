@@ -16,3 +16,6 @@ crash.log
 
 # Python のバイトコード（roles/*/files のスクリプトの構文チェックで作られる）
 __pycache__/
+
+# 録画のコピー用スクリプトの認証情報・フォルダ名（.env.ps1.example をコピーして作る）
+.env.ps1

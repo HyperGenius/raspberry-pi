@@ -20,6 +20,9 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）と、監視（Grafa
 │       └── host_vars/        # ホスト固有の変数（1台 = 1ファイル）
 │           ├── rpi-01.yml
 │           └── rpi-02.yml
+├── scripts/
+│   └── Copy-Recordings.ps1   # SFTPGo の録画データを Windows PC のフォルダへコピーする（PowerShell）
+├── .env.ps1.example          # Copy-Recordings.ps1 の環境変数のテンプレート（コピーした .env.ps1 は Git 管理外）
 ├── playbooks/
 │   ├── site.yml              # エントリポイント
 │   └── prepare_sd.yml        # 初回起動前に Mac 上で bootfs を準備する
@@ -366,6 +369,27 @@ curl -H "Authorization: Bearer $T" --data-binary @file.mp4 "$B/api/v2/user/files
 - ブラウザ: `http://192.168.10.55:8080/`（Web クライアント）
 - WebDAV: `http://192.168.10.55:10080/`（Finder の「サーバへ接続」など）
 - `genius` ユーザーでは、`/` に `data`（`/mnt/data/encoded`）と `share`（`/mnt/share`）が表示される。Windows のエクスプローラーは HTTP の WebDAV で Basic 認証を使わない（既定の設定）ため、WinSCP（プロトコルに WebDAV を選ぶ）や rclone、ブラウザの Web クライアントを使う
+
+### 録画データを PC へコピーする（scripts/Copy-Recordings.ps1）
+
+SFTPGo の REST API から `SFTPGO_REMOTE_DIR`（既定 `/data`）を再帰的にたどり、ファイルを `RECORDINGS_DEST_DIR` へコピーする（ディレクトリ構成は保つ）。Windows PowerShell 5.1 と PowerShell 7 で動く。取得元は読み取りだけで、削除・変更はしない。
+
+| 環境変数 | 必須 | 内容 |
+|---|---|---|
+| `SFTPGO_BASE_URL` | ○ | 例: `http://192.168.10.55:8080` |
+| `SFTPGO_USER` / `SFTPGO_PASSWORD` | ○ | SFTPGo のユーザー（`genius` など） |
+| `RECORDINGS_DEST_DIR` | ○ | コピー先のフォルダ |
+| `SFTPGO_REMOTE_DIR` | | コピー元（既定 `/data`） |
+
+```powershell
+Copy-Item .env.ps1.example .env.ps1     # 値を書く（.env.ps1 は Git 管理外）
+.\scripts\Copy-Recordings.ps1
+```
+
+- 環境変数は、リポジトリ直下に `.env.ps1` があれば先に読み込む。シェルに設定済みの環境変数だけでも動く。値をスクリプトやリポジトリに書かない
+- 同名で同じサイズのファイルはスキップするので、再実行しても重複してコピーしない
+- 途中のファイルは `<名前>.part` に書き、完了後にリネームする（中断しても不完全なファイルが元の名前で残らない。`.part` は次回上書きする）
+- コピー、スキップ、失敗の件数を表示する。失敗（認証エラー、環境変数の不足を含む）があれば終了コードは 1
 
 運用規約:
 
