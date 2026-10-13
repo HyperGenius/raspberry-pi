@@ -379,6 +379,7 @@ SFTPGo の REST API から `SFTPGO_REMOTE_DIR`（既定 `/data`）を再帰的�
 | `SFTPGO_BASE_URL` | ○ | 例: `http://192.168.10.55:8080` |
 | `SFTPGO_USER` / `SFTPGO_PASSWORD` | ○ | SFTPGo のユーザー（`genius` など） |
 | `RECORDINGS_DEST_DIR` | ○ | コピー先のフォルダ |
+| `EPGSTATION_BASE_URL` | ○ | 録画中の確認先。例: `http://192.168.10.55:8888`（`-SkipRecordingCheck` を付けるなら不要） |
 | `SFTPGO_REMOTE_DIR` | | コピー元（既定 `/data`） |
 
 ```powershell
@@ -386,6 +387,7 @@ Copy-Item .env.ps1.example .env.ps1     # 値を書く（.env.ps1 は Git 管理
 .\scripts\Copy-Recordings.ps1
 ```
 
+- コピーの前に EPGStation の API（`GET /api/recording`）で録画中でないことを確認する。録画中、または API に接続できない場合は、何もコピーせずに終了コード 1 で終わる（録画中のファイルを取り込まないため）。確認を省くには `-SkipRecordingCheck` を付ける
 - 環境変数は、リポジトリ直下に `.env.ps1` があれば先に読み込む。シェルに設定済みの環境変数だけでも動く。値をスクリプトやリポジトリに書かない
 - 同名で同じサイズのファイルはスキップするので、再実行しても重複してコピーしない
 - 途中のファイルは `<名前>.part` に書き、完了後にリネームする（中断しても不完全なファイルが元の名前で残らない。`.part` は次回上書きする）

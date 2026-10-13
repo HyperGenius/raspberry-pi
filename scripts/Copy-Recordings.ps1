@@ -4,7 +4,9 @@ Copies recordings from SFTPGo (REST API) to a local folder.
 
 .DESCRIPTION
 Walks SFTPGO_REMOTE_DIR recursively and downloads every file into RECORDINGS_DEST_DIR,
-keeping the directory layout. Files that already exist with the same name and size are
+keeping the directory layout.
+Before copying, it asks the EPGStation API whether a recording is in progress and
+aborts without copying if so (or if the API cannot be reached). Files that already exist with the same name and size are
 skipped, so it is safe to re-run. Each file is written to "<name>.part" and renamed when
 complete. The remote side is only read, never modified.
 
@@ -15,12 +17,17 @@ Settings come from environment variables. If .env.ps1 exists in the repository r
   SFTPGO_USER          required
   SFTPGO_PASSWORD      required
   RECORDINGS_DEST_DIR  required  local destination folder
+  EPGSTATION_BASE_URL  required  e.g. http://192.168.10.55:8888 (not needed with -SkipRecordingCheck)
   SFTPGO_REMOTE_DIR    optional  source folder on SFTPGo (default /data)
 
-Exit code: 0 on success, 1 on a configuration/authentication error or any failed file.
+.PARAMETER SkipRecordingCheck
+Copy without checking EPGStation for an active recording.
+
+Exit code: 0 on success, 1 on a configuration/authentication error, an active recording
+or any failed file.
 #>
 [CmdletBinding()]
-param()
+param([switch]$SkipRecordingCheck)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'  # Invoke-WebRequest is very slow with the progress bar on Windows PowerShell 5.1
@@ -28,7 +35,9 @@ $ProgressPreference = 'SilentlyContinue'  # Invoke-WebRequest is very slow with 
 $envFile = Join-Path $PSScriptRoot '..\.env.ps1'
 if (Test-Path -LiteralPath $envFile) { . $envFile }
 
-$missing = @('SFTPGO_BASE_URL', 'SFTPGO_USER', 'SFTPGO_PASSWORD', 'RECORDINGS_DEST_DIR') |
+$required = @('SFTPGO_BASE_URL', 'SFTPGO_USER', 'SFTPGO_PASSWORD', 'RECORDINGS_DEST_DIR')
+if (-not $SkipRecordingCheck) { $required += 'EPGSTATION_BASE_URL' }
+$missing = $required |
     Where-Object { -not [Environment]::GetEnvironmentVariable($_) }
 if ($missing) {
     Write-Error "Missing environment variables: $($missing -join ', ') (see .env.ps1.example)" -ErrorAction Continue
@@ -111,6 +120,22 @@ function Copy-Directory([string]$remote, [string]$local) {
             $script:failed++
         }
     }
+}
+
+if (-not $SkipRecordingCheck) {
+    try {
+        $uri = "$($env:EPGSTATION_BASE_URL.TrimEnd('/'))/api/recording?isHalfWidth=true&offset=0&limit=100"
+        $recording = Invoke-RestMethod -Uri $uri
+    } catch {
+        Write-Error "Could not check EPGStation for active recordings (check EPGSTATION_BASE_URL): $($_.Exception.Message)" -ErrorAction Continue
+        exit 1
+    }
+    if ([int]$recording.total -gt 0) {
+        Write-Warning "EPGStation is recording ($($recording.total)); nothing was copied:"
+        foreach ($r in @($recording.records)) { Write-Warning "  $($r.name)" }
+        exit 1
+    }
+    Write-Host 'No recording in progress.'
 }
 
 try {
