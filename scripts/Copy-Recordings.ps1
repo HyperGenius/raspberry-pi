@@ -7,7 +7,7 @@ Walks SFTPGO_REMOTE_DIR recursively and downloads every file into RECORDINGS_DES
 keeping the directory layout.
 Before copying, it asks the EPGStation API whether a recording is in progress and
 aborts without copying if so (or if the API cannot be reached). Files that already exist with the same name and size are
-skipped, so it is safe to re-run. Each file is written to "<name>.part" and renamed when
+skipped, so it is safe to re-run. Each file is written to a temporary ".download.part" in its folder and renamed when
 complete. The remote side is only read, never modified.
 
 Settings come from environment variables. If .env.ps1 exists in the repository root
@@ -30,7 +30,7 @@ or any failed file.
 param([switch]$SkipRecordingCheck)
 
 $ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'  # Invoke-WebRequest is very slow with the progress bar on Windows PowerShell 5.1
+$ProgressPreference = 'SilentlyContinue'  # Invoke-WebRequest is slow with the progress bar on Windows PowerShell 5.1
 
 $envFile = Join-Path $PSScriptRoot '..\.env.ps1'
 if (Test-Path -LiteralPath $envFile) { . $envFile }
@@ -47,7 +47,8 @@ if ($missing) {
 $baseUrl = $env:SFTPGO_BASE_URL.TrimEnd('/')
 $remoteRoot = if ($env:SFTPGO_REMOTE_DIR) { $env:SFTPGO_REMOTE_DIR } else { '/data' }
 $remoteRoot = '/' + $remoteRoot.Trim('/')
-$destRoot = $env:RECORDINGS_DEST_DIR
+# Resolve now: the .NET calls below use the process directory, not PowerShell's current location.
+$destRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:RECORDINGS_DEST_DIR)
 
 # The token is valid for 20 minutes, so renew it well before that.
 $script:token = $null
@@ -66,10 +67,32 @@ function Get-AuthHeader {
     return @{ Authorization = "Bearer $script:token" }
 }
 
+# Streams a download to disk. Not Invoke-WebRequest -OutFile: it treats [ ] in recording names as wildcards.
+Add-Type -AssemblyName System.Net.Http
+$script:http = New-Object System.Net.Http.HttpClient
+$script:http.Timeout = [TimeSpan]::FromHours(24)
+function Save-RemoteFile([string]$uri, [string]$path) {
+    Get-AuthHeader | Out-Null
+    $req = New-Object System.Net.Http.HttpRequestMessage ([System.Net.Http.HttpMethod]::Get), $uri
+    $req.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue 'Bearer', $script:token
+    $resp = $script:http.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+    try {
+        $resp.EnsureSuccessStatusCode() | Out-Null
+        $in = $resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $out = [IO.File]::Create($path)
+        try { $in.CopyTo($out) } finally { $out.Dispose(); $in.Dispose() }
+    } finally {
+        $resp.Dispose(); $req.Dispose()
+    }
+}
+
 function Get-RemoteEntries([string]$path) {
     $uri = "$baseUrl/api/v2/user/dirs?path=$([uri]::EscapeDataString($path))"
-    $entries = Invoke-RestMethod -Uri $uri -Headers (Get-AuthHeader)
-    return @($entries)  # not @(Invoke-RestMethod ...): Windows PowerShell 5.1 would nest the array
+    # Decode as UTF-8 ourselves: SFTPGo sends no charset, so Invoke-RestMethod on Windows PowerShell 5.1 reads it as ISO-8859-1.
+    $res = Invoke-WebRequest -Uri $uri -Headers (Get-AuthHeader) -UseBasicParsing
+    $entries = [Text.Encoding]::UTF8.GetString($res.RawContentStream.ToArray()) | ConvertFrom-Json
+    if ($null -eq $entries) { return @() }  # empty directory
+    return @($entries)  # not @(ConvertFrom-Json ...): Windows PowerShell 5.1 would nest the array
 }
 
 $script:copied = 0
@@ -90,7 +113,7 @@ function Copy-Directory([string]$remote, [string]$local) {
 
         if (([int64]$entry.mode -band 2147483648) -ne 0) {  # os.ModeDir
             try {
-                New-Item -ItemType Directory -Force -Path $localPath | Out-Null
+                [IO.Directory]::CreateDirectory($localPath) | Out-Null
                 Copy-Directory $remotePath $localPath
             } catch {
                 Write-Warning "Failed: $remotePath : $($_.Exception.Message)"
@@ -104,11 +127,12 @@ function Copy-Directory([string]$remote, [string]$local) {
             continue
         }
 
-        $part = "$localPath.part"
+        # A fixed, wildcard-free temporary name: recording names contain [ ], which -OutFile may treat as a pattern.
+        $part = Join-Path $local '.download.part'
         try {
             Write-Host "Copying $remotePath"
             $uri = "$baseUrl/api/v2/user/files?path=$([uri]::EscapeDataString($remotePath))"
-            Invoke-WebRequest -Uri $uri -Headers (Get-AuthHeader) -OutFile $part | Out-Null
+            Save-RemoteFile $uri $part
             if ((Get-Item -LiteralPath $part).Length -ne [int64]$entry.size) {
                 throw "size mismatch (expected $($entry.size) bytes)"
             }
@@ -139,7 +163,7 @@ if (-not $SkipRecordingCheck) {
 }
 
 try {
-    New-Item -ItemType Directory -Force -Path $destRoot | Out-Null
+    [IO.Directory]::CreateDirectory($destRoot) | Out-Null
     Copy-Directory $remoteRoot $destRoot
 } catch {
     Write-Error $_.Exception.Message -ErrorAction Continue
