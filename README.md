@@ -21,7 +21,7 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）と、監視（Grafa
 │           ├── rpi-01.yml
 │           └── rpi-02.yml
 ├── scripts/
-│   └── Copy-Recordings.ps1   # SFTPGo の録画データを Windows PC のフォルダへコピーする（PowerShell）
+│   └── Copy-Recordings.ps1   # SFTPGo の録画データを Windows PC のフォルダへコピー（移動）する（PowerShell）
 ├── .env.ps1.example          # Copy-Recordings.ps1 の環境変数のテンプレート（コピーした .env.ps1 は Git 管理外）
 ├── playbooks/
 │   ├── site.yml              # エントリポイント
@@ -384,26 +384,42 @@ curl -H "Authorization: Bearer $T" --data-binary @xxx.mp4 "$B/api/v2/user/files/
 
 ### 録画データを PC へコピーする（scripts/Copy-Recordings.ps1）
 
-SFTPGo の REST API から `SFTPGO_REMOTE_DIR`（既定 `/data`）を再帰的にたどり、ファイルを `RECORDINGS_DEST_DIR` へコピーする（ディレクトリ構成は保つ）。Windows PowerShell 5.1 と PowerShell 7 で動く。取得元は読み取りだけで、削除・変更はしない。
+SFTPGo の REST API から `SFTPGO_REMOTE_DIR`（既定 `/data`）を再帰的にたどり、ファイルを `RECORDINGS_DEST_DIR` へコピーする（ディレクトリ構成は保つ）。Windows PowerShell 5.1 と PowerShell 7 で動く。既定では取得元は読み取りだけで、削除・変更はしない。`-DeleteAfterCopy` を付けると、コピーできたファイルを取得元から削除する（移動）。
 
 | 環境変数 | 必須 | 内容 |
 |---|---|---|
 | `SFTPGO_BASE_URL` | ○ | 例: `http://192.168.10.55:8080` |
-| `SFTPGO_USER` / `SFTPGO_PASSWORD` | ○ | SFTPGo のユーザー（`genius` など） |
+| `SFTPGO_USER` / `SFTPGO_PASSWORD` | ○ | SFTPGo のユーザー（`genius` など。`-DeleteAfterCopy` では取得元に `delete` 権限のある `encoder`） |
 | `RECORDINGS_DEST_DIR` | ○ | コピー先のフォルダ |
 | `EPGSTATION_BASE_URL` | ○ | 録画中の確認先。例: `http://192.168.10.55:8888`（`-SkipRecordingCheck` を付けるなら不要） |
-| `SFTPGO_REMOTE_DIR` | | コピー元（既定 `/data`） |
+| `SFTPGO_REMOTE_DIR` | | コピー元（既定 `/data`。`encoder` で録画を移動するなら `/recorded`） |
 
 ```powershell
 Copy-Item .env.ps1.example .env.ps1     # 値を書く（.env.ps1 は Git 管理外）
 .\scripts\Copy-Recordings.ps1
+
+# 録画を PC へ移動する（.env.ps1 で SFTPGO_USER = 'encoder'、SFTPGO_REMOTE_DIR = '/recorded' にする）
+.\scripts\Copy-Recordings.ps1 -DeleteAfterCopy -WhatIf   # コピー・削除するファイルを表示するだけ
+.\scripts\Copy-Recordings.ps1 -DeleteAfterCopy
 ```
 
 - コピーの前に EPGStation の API（`GET /api/recording`）で録画中でないことを確認する。録画中、または API に接続できない場合は、何もコピーせずに終了コード 1 で終わる（録画中のファイルを取り込まないため）。確認を省くには `-SkipRecordingCheck` を付ける
 - 環境変数は、リポジトリ直下に `.env.ps1` があれば先に読み込む。シェルに設定済みの環境変数だけでも動く。値をスクリプトやリポジトリに書かない
 - 同名で同じサイズのファイルはスキップするので、再実行しても重複してコピーしない
 - 途中のファイルは各フォルダの `.download.part` に書き、完了後にリネームする（中断しても不完全なファイルが元の名前で残らない。`.download.part` は次回上書きする）。`[字]` のような括弧を含む録画名も扱える
-- コピー、スキップ、失敗の件数を表示する。失敗（認証エラー、環境変数の不足を含む）があれば終了コードは 1
+- 名前が `.sftpgo-upload.` で始まるファイル（アップロード途中の一時ファイル）はコピーも削除もしない
+- コピー、スキップ、削除、失敗の件数を表示する。失敗（認証エラー、環境変数の不足を含む）があれば終了コードは 1
+
+`-DeleteAfterCopy`（コピーしたファイルを取得元から削除する）:
+
+- 1 ファイルずつ、ローカルへの書き出し（ディスクへのフラッシュ）・サイズの確認・リネームが済んでから、SFTPGo の API（`DELETE /api/v2/user/files`）で削除する。コピーに失敗したファイルは削除しない
+- コピー済み（同名・同サイズでスキップした）ファイルも削除する。スイッチなしでコピーしたファイルも、次に付けて実行すれば消える
+- **削除のたびに EPGStation の録画中を確認し直す。** 途中で録画が始まった、または API に接続できない場合は、残りのファイルはコピーだけして削除しない（終了コード 1。録画が終わってから再実行すれば、スキップして削除する）
+- `-SkipRecordingCheck` とは同時に指定できない
+- ディレクトリは削除しない（空になっても残す）。サブディレクトリ（`/recorded/backup` など）の中のファイルもコピー・削除の対象になる
+- 削除に失敗したファイルは失敗に数える（ローカルのコピーは残るので、再実行すればスキップして削除する）
+- `-WhatIf` を付けると何も変更せず、コピー・削除するファイルを表示する。`-Confirm` で 1 件ずつ確認もできる
+- SFTPGo で削除した録画は、EPGStation の録画一覧にファイルのない録画として残る（上記のとおり許容している）
 
 運用規約:
 

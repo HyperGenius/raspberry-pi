@@ -8,7 +8,8 @@ keeping the directory layout.
 Before copying, it asks the EPGStation API whether a recording is in progress and
 aborts without copying if so (or if the API cannot be reached). Files that already exist with the same name and size are
 skipped, so it is safe to re-run. Each file is written to a temporary ".download.part" in its folder and renamed when
-complete. The remote side is only read, never modified.
+complete. Without -DeleteAfterCopy the remote side is only read, never modified.
+Files named ".sftpgo-upload.*" (uploads in progress) are ignored.
 
 Settings come from environment variables. If .env.ps1 exists in the repository root
 (git-ignored; see .env.ps1.example) it is loaded first.
@@ -21,16 +22,30 @@ Settings come from environment variables. If .env.ps1 exists in the repository r
   SFTPGO_REMOTE_DIR    optional  source folder on SFTPGo (default /data)
 
 .PARAMETER SkipRecordingCheck
-Copy without checking EPGStation for an active recording.
+Copy without checking EPGStation for an active recording. Cannot be combined with -DeleteAfterCopy.
 
-Exit code: 0 on success, 1 on a configuration/authentication error, an active recording
-or any failed file.
+.PARAMETER DeleteAfterCopy
+Delete each remote file once its local copy is complete (just copied, or already present with the same size).
+EPGStation is checked again before every delete; if a recording has started or the API cannot be reached,
+the remaining files are copied but not deleted. Directories are never deleted.
+With -WhatIf nothing is copied or deleted; the files that would be are listed.
+
+Exit code: 0 on success, 1 on a configuration/authentication error, an active recording,
+any failed file, or deletes stopped by a recording.
 #>
-[CmdletBinding()]
-param([switch]$SkipRecordingCheck)
+[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+    [switch]$SkipRecordingCheck,
+    [switch]$DeleteAfterCopy
+)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'  # Invoke-WebRequest is slow with the progress bar on Windows PowerShell 5.1
+
+if ($DeleteAfterCopy -and $SkipRecordingCheck) {
+    Write-Error '-DeleteAfterCopy cannot be combined with -SkipRecordingCheck (a file being recorded could be deleted)' -ErrorAction Continue
+    exit 1
+}
 
 $envFile = Join-Path $PSScriptRoot '..\.env.ps1'
 if (Test-Path -LiteralPath $envFile) { . $envFile }
@@ -80,7 +95,8 @@ function Save-RemoteFile([string]$uri, [string]$path) {
         $resp.EnsureSuccessStatusCode() | Out-Null
         $in = $resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
         $out = [IO.File]::Create($path)
-        try { $in.CopyTo($out) } finally { $out.Dispose(); $in.Dispose() }
+        # Flush to disk: with -DeleteAfterCopy the remote file is gone once this returns.
+        try { $in.CopyTo($out); $out.Flush($true) } finally { $out.Dispose(); $in.Dispose() }
     } finally {
         $resp.Dispose(); $req.Dispose()
     }
@@ -95,13 +111,52 @@ function Get-RemoteEntries([string]$path) {
     return @($entries)  # not @(ConvertFrom-Json ...): Windows PowerShell 5.1 would nest the array
 }
 
+# Returns the active recordings. Throws if the EPGStation API cannot be reached.
+function Get-ActiveRecordings {
+    $uri = "$($env:EPGSTATION_BASE_URL.TrimEnd('/'))/api/recording?isHalfWidth=true&offset=0&limit=100"
+    return Invoke-RestMethod -Uri $uri
+}
+
 $script:copied = 0
 $script:skipped = 0
+$script:deleted = 0
 $script:failed = 0
+$script:deleteStopped = $false
 
-function Copy-Directory([string]$remote, [string]$local) {
+# Deletes a remote file whose local copy is complete, unless a recording has started since the last check.
+function Remove-RemoteFile {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([string]$remotePath)
+    if ($script:deleteStopped -or -not $PSCmdlet.ShouldProcess($remotePath, 'Delete')) { return }
+    try {
+        $recording = Get-ActiveRecordings
+    } catch {
+        Write-Warning "Could not check EPGStation for active recordings; no more files will be deleted: $($_.Exception.Message)"
+        $script:deleteStopped = $true
+        return
+    }
+    if ([int]$recording.total -gt 0) {
+        Write-Warning "EPGStation started recording ($($recording.total)); no more files will be deleted"
+        $script:deleteStopped = $true
+        return
+    }
+    try {
+        $uri = "$baseUrl/api/v2/user/files?path=$([uri]::EscapeDataString($remotePath))"
+        Invoke-RestMethod -Method Delete -Uri $uri -Headers (Get-AuthHeader) | Out-Null
+        Write-Host "Deleted $remotePath"
+        $script:deleted++
+    } catch {
+        Write-Warning "Failed to delete: $remotePath : $($_.Exception.Message)"
+        $script:failed++
+    }
+}
+
+function Copy-Directory {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([string]$remote, [string]$local)
     foreach ($entry in Get-RemoteEntries $remote) {
         $name = [string]$entry.name
+        if ($name.StartsWith('.sftpgo-upload.')) { continue }  # an upload in progress (written by SFTPGo, renamed when done)
         # Never let a remote name escape the destination folder.
         if (-not $name -or $name -eq '.' -or $name -eq '..' -or $name -match '[\/:*?"<>|]') {
             Write-Warning "Skipping unsafe name: $remote/$name"
@@ -113,7 +168,7 @@ function Copy-Directory([string]$remote, [string]$local) {
 
         if (([int64]$entry.mode -band 2147483648) -ne 0) {  # os.ModeDir
             try {
-                [IO.Directory]::CreateDirectory($localPath) | Out-Null
+                if (-not $WhatIfPreference) { [IO.Directory]::CreateDirectory($localPath) | Out-Null }
                 Copy-Directory $remotePath $localPath
             } catch {
                 Write-Warning "Failed: $remotePath : $($_.Exception.Message)"
@@ -124,6 +179,13 @@ function Copy-Directory([string]$remote, [string]$local) {
 
         if ((Test-Path -LiteralPath $localPath -PathType Leaf) -and (Get-Item -LiteralPath $localPath).Length -eq [int64]$entry.size) {
             $script:skipped++
+            if ($DeleteAfterCopy) { Remove-RemoteFile $remotePath }
+            continue
+        }
+
+        if (-not $PSCmdlet.ShouldProcess($remotePath, 'Copy')) {
+            # With -WhatIf, also list the delete that would follow the copy.
+            if ($WhatIfPreference -and $DeleteAfterCopy) { Remove-RemoteFile $remotePath }
             continue
         }
 
@@ -136,20 +198,21 @@ function Copy-Directory([string]$remote, [string]$local) {
             if ((Get-Item -LiteralPath $part).Length -ne [int64]$entry.size) {
                 throw "size mismatch (expected $($entry.size) bytes)"
             }
-            Move-Item -LiteralPath $part -Destination $localPath -Force
+            Move-Item -LiteralPath $part -Destination $localPath -Force -Confirm:$false
             $script:copied++
         } catch {
             Write-Warning "Failed: $remotePath : $($_.Exception.Message)"
-            Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $part -Force -Confirm:$false -ErrorAction SilentlyContinue
             $script:failed++
+            continue
         }
+        if ($DeleteAfterCopy) { Remove-RemoteFile $remotePath }
     }
 }
 
 if (-not $SkipRecordingCheck) {
     try {
-        $uri = "$($env:EPGSTATION_BASE_URL.TrimEnd('/'))/api/recording?isHalfWidth=true&offset=0&limit=100"
-        $recording = Invoke-RestMethod -Uri $uri
+        $recording = Get-ActiveRecordings
     } catch {
         Write-Error "Could not check EPGStation for active recordings (check EPGSTATION_BASE_URL): $($_.Exception.Message)" -ErrorAction Continue
         exit 1
@@ -163,12 +226,13 @@ if (-not $SkipRecordingCheck) {
 }
 
 try {
-    [IO.Directory]::CreateDirectory($destRoot) | Out-Null
+    if (-not $WhatIfPreference) { [IO.Directory]::CreateDirectory($destRoot) | Out-Null }
     Copy-Directory $remoteRoot $destRoot
 } catch {
     Write-Error $_.Exception.Message -ErrorAction Continue
     exit 1
 }
 
-Write-Host "Done: copied $script:copied, skipped $script:skipped, failed $script:failed"
-if ($script:failed -gt 0) { exit 1 }
+Write-Host "Done: copied $script:copied, skipped $script:skipped, deleted $script:deleted, failed $script:failed"
+if ($script:deleteStopped) { Write-Warning 'Deleting was stopped; re-run when no recording is in progress to delete the remaining files.' }
+if ($script:failed -gt 0 -or $script:deleteStopped) { exit 1 }
