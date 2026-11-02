@@ -510,7 +510,7 @@ $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hour
 Register-ScheduledTask -TaskName 'MyTasks\SleepAfterCopy' -Action $action -Principal $principal -Settings $settings
 
 # Copy-Recordings の登録の -Argument の末尾に -SleepAfter を足す（登録済みなら変更する）
-$task = Get-ScheduledTask -TaskPath '\MyTasks' -TaskName 'CopyRecordings'
+$task = Get-ScheduledTask -TaskPath '\MyTasks\' -TaskName 'CopyRecordings'
 $task.Actions[0].Arguments += ' -SleepAfter'
 Set-ScheduledTask -InputObject $task
 ```
