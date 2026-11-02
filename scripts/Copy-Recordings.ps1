@@ -29,6 +29,11 @@ Nothing is written with -WhatIf.
 .PARAMETER SkipRecordingCheck
 Copy without checking EPGStation for an active recording. Cannot be combined with -DeleteAfterCopy.
 
+.PARAMETER SleepAfter
+When the run ends, start the scheduled task \MyTasks\SleepAfterCopy (Sleep-Computer.ps1), which puts the PC back to sleep
+if the scheduled task woke it. Not done after a run skipped because of a recording (the task's retry still has to run),
+or with -WhatIf. Register that task first (see README).
+
 .PARAMETER DeleteAfterCopy
 Delete each remote file once its local copy is complete (just copied, or already present with the same size).
 EPGStation is checked again before every delete; if a recording has started or the API cannot be reached,
@@ -41,7 +46,8 @@ any failed file, or deletes stopped by a recording.
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [switch]$SkipRecordingCheck,
-    [switch]$DeleteAfterCopy
+    [switch]$DeleteAfterCopy,
+    [switch]$SleepAfter
 )
 
 $ErrorActionPreference = 'Stop'
@@ -144,6 +150,15 @@ function Write-Metrics([string]$reason, [int]$code) {
 function Complete-Run([string]$reason, [int]$code) {
     if ($script:logFile) {
         try { Write-Metrics $reason $code } catch { Write-Warning "Could not write $metricsFile : $($_.Exception.Message)" }
+    }
+    # A separate task does the sleeping: this process would be frozen by the sleep, and its task would still be running at the next trigger.
+    if ($SleepAfter -and -not $WhatIfPreference -and $reason -ne 'recording') {
+        try {
+            Start-ScheduledTask -TaskPath '\MyTasks' -TaskName 'SleepAfterCopy'
+            Write-Log 'Started the SleepAfterCopy task'
+        } catch {
+            Write-Log "Could not start the SleepAfterCopy task (register it first; see README): $($_.Exception.Message)" WARN
+        }
     }
     exit $code
 }

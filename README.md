@@ -22,7 +22,8 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）と、監視（Grafa
 │           └── rpi-02.yml
 ├── scripts/
 │   ├── Copy-Recordings.ps1   # SFTPGo の録画データを Windows PC のフォルダへコピー（移動）する。ログとメトリクスのファイルも書く（PowerShell）
-│   └── Install-Alloy.ps1     # Windows PC に Grafana Alloy を導入し、Copy-Recordings.ps1 のログとメトリクスを Grafana Cloud に送る
+│   ├── Install-Alloy.ps1     # Windows PC に Grafana Alloy を導入し、Copy-Recordings.ps1 のログとメトリクスを Grafana Cloud に送る
+│   └── Sleep-Computer.ps1    # Copy-Recordings.ps1 -SleepAfter から起動するタスクで、タスクが起こした PC をスリープに戻す
 ├── windows/
 │   └── alloy/
 │       └── config.alloy.tmpl # Install-Alloy.ps1 が値を埋めて配置する Alloy の設定（Windows PC 用）
@@ -495,6 +496,31 @@ Register-ScheduledTask -TaskName 'MyTasks\CopyRecordings' -Action $action -Trigg
 
 - 運用: スクリプトが `.env.ps1`（リポジトリ直下）を読むので、SYSTEM で実行するならそのファイルを SYSTEM が読めるようにしておく（ユーザーのフォルダ配下に置かない）
 - ログとメトリクスの出力先は、スクリプトと Alloy の設定（`DATA_DIR`）で同じにする。`COPY_RECORDINGS_DATA_DIR` を変えたら `Install-Alloy.ps1` も再実行する
+
+#### 実行後にスリープへ戻す（`-SleepAfter` / scripts/Sleep-Computer.ps1）
+
+`WakeToRun` で 3:00 に起こした PC を、終わったらスリープに戻す。`Copy-Recordings.ps1` 自身がスリープすると、スリープ中はプロセスが止まったままになり、次の 3:00 に前回のタスクがまだ実行中とみなされて起動しない。そのため、スリープ専用のタスク `\MyTasks\SleepAfterCopy` を別に登録し、`-SleepAfter` を付けると実行の最後にそのタスクを起動する。
+
+```powershell
+# 管理者権限の PowerShell で（トリガーなし。Copy-Recordings.ps1 -SleepAfter が起動する）
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+  -Argument '-NoProfile -ExecutionPolicy Bypass -File "C:\projects\MyProductsaspberry-pi\scripts\Sleep-Computer.ps1"'
+$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+Register-ScheduledTask -TaskName 'MyTasks\SleepAfterCopy' -Action $action -Principal $principal -Settings $settings
+
+# Copy-Recordings の登録の -Argument の末尾に -SleepAfter を足す（登録済みなら変更する）
+$task = Get-ScheduledTask -TaskPath '\MyTasks' -TaskName 'CopyRecordings'
+$task.Actions[0].Arguments += ' -SleepAfter'
+Set-ScheduledTask -InputObject $task
+```
+
+- スリープするのは、**直近の復帰が `MyTasks\CopyRecordings` タスクによるもの**（システムログの Power-Troubleshooter ID 1 の「スリープ状態の解除元」にタスク名がある。8 時間以内）のときだけ。すでに起きていた PC や、自分で起こした PC（電源ボタン・Wi-Fi など）はそのままにする
+- 起こしたタスクの後でも、Alloy が最後のログとメトリクスを送れるよう、既定で 120 秒待ってからスリープする（`-DelaySeconds`）
+- キーボード・マウスの入力が `-MinIdleMinutes`（既定 10）以内なら、スリープしない（リモートデスクトップなど入力時刻が取れるセッションだけ。コンソールのセッションでは取れないことが多く、3:00 に起こされた後で使い始めた場合はスリープすることがある）
+- 録画中でスキップした実行（`reason="recording"`）では起動しない。タスクの再試行（10 分おき）が走るため。再試行が尽きた場合は起きたままになる（Windows 既定のスリープ設定に任せる）
+- 判定とスリープの結果は、同じログに `sleep:` 付きの行で残る（`Not sleeping: ...` / `Going to sleep`）
+- 動作確認: `.\scripts\Sleep-Computer.ps1 -WhatIf`（待たず、スリープもしない）
 
 ## 録画サーバー（roles/epgstation）
 
