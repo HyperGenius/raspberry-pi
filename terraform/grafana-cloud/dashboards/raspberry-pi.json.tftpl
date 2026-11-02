@@ -979,6 +979,251 @@
         }
       },
       "description": "compose ファイルにあるコンテナ（compose-metrics.timer が 1 分ごとに書き出す）。停止は compose down で削除された場合を含む"
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Copy-Recordings 最終実行からの経過",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource_uid}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 37,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
+          },
+          "refId": "A",
+          "expr": "time() - max by (instance) (copy_recordings_last_run_timestamp_seconds{job=\"${copy_job}\"})",
+          "legendFormat": "{{instance}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": ${copy_no_run_seconds}
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center"
+      },
+      "description": "Windows の Copy-Recordings.ps1 が最後に終わってからの時間。赤はアラートのしきい値（copy_recordings_no_run_for）"
+    },
+    {
+      "id": 15,
+      "type": "stat",
+      "title": "Copy-Recordings 最終成功からの経過",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource_uid}"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 37,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
+          },
+          "refId": "A",
+          "expr": "time() - max by (instance) (copy_recordings_last_success_timestamp_seconds{job=\"${copy_job}\"})",
+          "legendFormat": "{{instance}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": ${copy_no_success_seconds}
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center"
+      },
+      "description": "最後に成功（終了コード 0）してからの時間。赤はアラートのしきい値（copy_recordings_no_success_for）"
+    },
+    {
+      "id": 16,
+      "type": "state-timeline",
+      "title": "Copy-Recordings の終わり方",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource_uid}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 37,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
+          },
+          "refId": "A",
+          "expr": "copy_recordings_exit_reason{job=\"${copy_job}\"} == 1",
+          "legendFormat": "{{reason}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0,
+            "insertNulls": 3600000
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.8,
+        "alignValue": "left",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "description": "実行ごとの reason（ok / recording / config / epgstation / auth / failed / delete_stopped）。recording は録画中でコピーしなかった（異常ではない）"
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Copy-Recordings のコピー件数",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource_uid}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 37,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource_uid}"
+          },
+          "refId": "A",
+          "expr": "copy_recordings_files{job=\"${copy_job}\"}",
+          "legendFormat": "{{result}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "spanNulls": true,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "description": "直近の実行の件数（copied / skipped / deleted / failed）"
     }
   ]
 }

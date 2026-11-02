@@ -726,7 +726,7 @@ ansible-playbook playbooks/site.yml --limit rpi-01 --tags alloy --ask-vault-pass
 
 ## ダッシュボード・アラート（terraform/grafana-cloud）
 
-roles/alloy が送るメトリクスのダッシュボードとアラートを、Grafana Cloud に [Terraform の Grafana プロバイダ](https://registry.terraform.io/providers/grafana/grafana/latest/docs)で作る。容量不足・高温・メモリ不足・低電圧・Pi の停止・USB ストレージの未マウント・サービスとコンテナの停止を Slack に通知する。Ansible の `grafana.grafana` コレクションにはアラートルールのモジュールがないため、Terraform を使う（`terraform plan` で差分を確認でき、コードから消したリソースは Grafana Cloud からも消える）。
+roles/alloy が送るメトリクスのダッシュボードとアラートを、Grafana Cloud に [Terraform の Grafana プロバイダ](https://registry.terraform.io/providers/grafana/grafana/latest/docs)で作る。容量不足・高温・メモリ不足・低電圧・Pi の停止・USB ストレージの未マウント・サービスとコンテナの停止、Windows の Copy-Recordings の未実行・失敗を Slack に通知する。Ansible の `grafana.grafana` コレクションにはアラートルールのモジュールがないため、Terraform を使う（`terraform plan` で差分を確認でき、コードから消したリソースは Grafana Cloud からも消える）。
 
 | リソース | 内容 |
 |---|---|
@@ -743,6 +743,7 @@ roles/alloy が送るメトリクスのダッシュボードとアラートを�
 - 低電圧（表示している期間に `rpi_volt` の警告があったか）
 - ストレージ（`/`・`/var/lib/docker`・`/mnt/data`・`/mnt/share`）の使用率・空き容量・空き容量の推移
 - マウント・サービス・コンテナの状態の推移（state timeline。マウントの空白はマウントされていない期間）
+- Copy-Recordings（Windows。`instance` の変数とは関係なく、届いているものすべて）: 最終実行・最終成功からの経過、終わり方（`reason`）の推移、コピー件数
 - ゲージの赤はアラートのしきい値（変数）に合わせる
 
 アラートルール（しきい値・継続時間は変数。Slack の通知文には summary のホスト名・マウント先・現在の値が入る）:
@@ -761,6 +762,9 @@ roles/alloy が送るメトリクスのダッシュボードとアラートを�
 | コンテナの異常 | コンテナのヘルスチェックが unhealthy の状態が 5 分続く | `container_unhealthy_for` |
 | コンテナの再起動の繰り返し | コンテナが 15 分に 2 回を超えて再起動した | `container_restarts` / `container_restarts_window` |
 | コンテナの状態を取得できない | `compose-metrics` のファイルが 5 分更新されない、または読み込めない | `container_metrics_stale_for` |
+| Copy-Recordings が実行されていない | 最後の実行から 26 時間経った（タスクスケジューラ・PC・Alloy の停止） | `copy_recordings_no_run_for` |
+| Copy-Recordings の成功が続いていない | 実行はされているが、最後の成功から 48 時間経った（成功したことがない場合を含む） | `copy_recordings_no_success_for` |
+| Copy-Recordings の失敗 | `reason` が `config` / `epgstation` / `auth` / `failed` / `delete_stopped` の状態が 30 分続く（`recording` は異常ではない） | `copy_recordings_failed_for` |
 
 | 変数 | 既定 | 内容 |
 |---|---|---|
@@ -770,6 +774,7 @@ roles/alloy が送るメトリクスのダッシュボードとアラートを�
 | `prometheus_data_source_name` | `grafanacloud-<stack>-prom` | Prometheus のデータソース名（スタックの URL から決める） |
 | `job` | `integrations/node_exporter` | `job` ラベル（roles/alloy の `alloy_job`） |
 | `instances` | `["rpi-01"]` | 停止を検知するホスト（roles/alloy を適用したホスト） |
+| `copy_recordings_job` | `copy-recordings` | Copy-Recordings のメトリクスの `job` ラベル（`windows/alloy/config.alloy.tmpl`） |
 | `repeat_interval` | `4h` | 同じアラートを繰り返し通知する間隔 |
 | `mount_points` | `{ "rpi-01" = ["/", "/var/lib/docker", "/mnt/data", "/mnt/share"] }` | マウントされているべきマウント先（ホストごと。roles/alloy の `alloy_filesystem_mount_points` にそろえる） |
 
@@ -777,6 +782,7 @@ roles/alloy が送るメトリクスのダッシュボードとアラートを�
 - 「メトリクスが届かない」は `absent_over_time` で判定するため、ホストを `instances` に並べる（Alloy を適用したホストを増やしたら追加する）。USB が外れてマウント先のメトリクスが届かなくなった場合は「マウントされていない」で通知する
 - 「マウントされていない」は、同じ期間にそのホストの `node_uname_info` が届いているときだけ発火する。同じ scrape のサンプルなので、Pi 全体が止まったときは「メトリクスが届かない」だけが通知される。「コンテナの状態を取得できない」も、2 分以内に届いた値だけで判定し、Pi の停止とは重複させない
 - USB が外れると、マウント → unit（`RequiresMountsFor`）→ コンテナの順に止まる。「コンテナの停止」は unit が active のときだけ判定し、unit の停止は「サービスの停止」で通知する（起動中の activating はどちらも通知しない）
+- Copy-Recordings のルールは `instance`（PC 名）を一覧にせず、届いているものを対象にする。最後の実行・成功の時刻は `max_over_time(...[7d])` で見るため、Alloy が止まって系列が消えても未実行を通知できる（PC を一度も送っていない場合は検知できない）。「成功が続いていない」は、実行されているときだけ判定し、「実行されていない」と重複させない。`recording` の後にタスクスケジューラの再試行で `ok` になれば「失敗」は発火しないか解決する
 - 高温によるスロットリング（85℃ から）は、その手前の「CPU の高温」で通知する
 - アラートはフォルダと名前でまとめて（`group_by`）、30 秒待ってから送る
 - Terraform で作ったアラートルール・通知先・通知ポリシーは画面では編集できない（provisioned）。ダッシュボードは画面で変えられるが、次の `apply` で戻る
