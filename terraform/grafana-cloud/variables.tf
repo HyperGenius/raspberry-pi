@@ -259,3 +259,43 @@ variable "container_metrics_stale_for" {
     error_message = "container_metrics_stale_for は数字 + m / h で、4 分以上にすること（例: 5m）。"
   }
 }
+
+# ---- Copy-Recordings（Windows。scripts/Copy-Recordings.ps1 が書き出す copy_recordings_*）----
+variable "copy_recordings_job" {
+  description = "Copy-Recordings のメトリクスの job ラベル（windows/alloy/config.alloy.tmpl）"
+  type        = string
+  default     = "copy-recordings"
+}
+
+variable "copy_recordings_no_run_for" {
+  description = "Copy-Recordings が終わってからこの時間経っても次の実行がなければ通知する（1 日 1 回の実行なら 26h）"
+  type        = string
+  default     = "26h"
+
+  validation {
+    condition     = can(regex("^[0-9]+[mh]$", var.copy_recordings_no_run_for))
+    error_message = "copy_recordings_no_run_for は数字 + m / h にすること（例: 26h）。"
+  }
+}
+
+variable "copy_recordings_no_success_for" {
+  description = "Copy-Recordings の成功（終了コード 0）がこの時間ない場合に通知する（実行はされている場合。成功したことがない場合を含む）"
+  type        = string
+  default     = "48h"
+
+  validation {
+    condition     = can(regex("^[0-9]+[mh]$", var.copy_recordings_no_success_for))
+    error_message = "copy_recordings_no_success_for は数字 + m / h にすること（例: 48h）。"
+  }
+}
+
+variable "copy_recordings_failed_for" {
+  description = "Copy-Recordings が失敗（auth / config / epgstation / failed / delete_stopped）で終わった状態がこの時間続いたら通知する（タスクスケジューラの再試行で成功すれば解決する）"
+  type        = string
+  default     = "30m"
+
+  validation {
+    condition     = can(regex("^[0-9]+[smh]$", var.copy_recordings_failed_for))
+    error_message = "copy_recordings_failed_for は数字 + s / m / h にすること（例: 30m）。"
+  }
+}

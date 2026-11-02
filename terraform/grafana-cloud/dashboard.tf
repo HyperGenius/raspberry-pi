@@ -24,6 +24,7 @@ locals {
     mount        = 11
     service      = 12
     container    = 13
+    copy         = 14
   }
 }
 
@@ -34,6 +35,9 @@ resource "grafana_dashboard" "raspberry_pi" {
     uid                     = local.dashboard_uid
     datasource_uid          = data.grafana_data_source.prometheus.uid
     job                     = var.job
+    copy_job                = var.copy_recordings_job
+    copy_no_run_seconds     = local.copy_no_run_seconds
+    copy_no_success_seconds = local.copy_no_success_seconds
     cpu_temp_celsius        = var.cpu_temp_celsius
     memory_used_percent_max = 100 - var.memory_available_percent
     disk_used_percent_max   = 100 - var.disk_free_percent

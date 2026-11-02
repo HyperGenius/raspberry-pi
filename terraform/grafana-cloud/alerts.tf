@@ -28,6 +28,16 @@ locals {
   container_metrics_stale_seconds = tonumber(regex("^[0-9]+", var.container_metrics_stale_for)) * (endswith(var.container_metrics_stale_for, "h") ? 3600 : 60)
   container_metrics_stale_expr    = "(time() - max by (instance) (max_over_time(node_textfile_mtime_seconds{${local.selector}}[2m]))) > ${local.container_metrics_stale_seconds} or max by (instance) (node_textfile_scrape_error{${local.selector}})"
 
+  # Copy-Recordings（Windows）。メトリクスの instance は PC 名なので、ホストの一覧は持たず、届いているものを対象にする
+  copy_selector           = "job=\"${var.copy_recordings_job}\""
+  copy_no_run_seconds     = tonumber(regex("^[0-9]+", var.copy_recordings_no_run_for)) * (endswith(var.copy_recordings_no_run_for, "h") ? 3600 : 60)
+  copy_no_success_seconds = tonumber(regex("^[0-9]+", var.copy_recordings_no_success_for)) * (endswith(var.copy_recordings_no_success_for, "h") ? 3600 : 60)
+
+  # 最後の実行・成功からの経過秒数。max_over_time(7d) で、Alloy が止まって系列が消えた後も判定を続ける
+  # （5 分を過ぎると instant クエリには出なくなるため）。7d は copy_recordings_no_*_for より長くすること
+  copy_since_run_expr     = "time() - max by (instance) (max_over_time(copy_recordings_last_run_timestamp_seconds{${local.copy_selector}}[7d]))"
+  copy_since_success_expr = "time() - max by (instance) (max_over_time(copy_recordings_last_success_timestamp_seconds{${local.copy_selector}}[7d]))"
+
   rules = [
     {
       name      = "空き容量の不足"
@@ -140,6 +150,37 @@ locals {
       for       = "0s"
       panel     = "container"
       summary   = "{{ $labels.instance }} のコンテナの状態が更新されていない（journalctl -u compose-metrics.service を確認する）"
+    },
+    {
+      # 実行されていない（タスクスケジューラの停止・PC の停止・Alloy の停止など）
+      name      = "Copy-Recordings が実行されていない"
+      expr      = local.copy_since_run_expr
+      evaluator = "gt"
+      threshold = local.copy_no_run_seconds
+      for       = "0s"
+      panel     = "copy"
+      summary   = "{{ $labels.instance }} の Copy-Recordings の最後の実行から {{ humanizeDuration $values.A.Value }} 経っている（しきい値: ${var.copy_recordings_no_run_for}。タスクスケジューラ・Alloy を確認する）"
+    },
+    {
+      # 実行はされているのに成功していない。実行されていないときは上のルールで通知するため、重複させない
+      # （成功したことがない場合は、経過秒数が現在の時刻になるので発火する）
+      name      = "Copy-Recordings の成功が続いていない"
+      expr      = "(${local.copy_since_success_expr}) and on (instance) ((${local.copy_since_run_expr}) <= ${local.copy_no_run_seconds})"
+      evaluator = "gt"
+      threshold = local.copy_no_success_seconds
+      for       = "0s"
+      panel     = "copy"
+      summary   = "{{ $labels.instance }} の Copy-Recordings の最後の成功から {{ humanizeDuration $values.A.Value }} 経っている（しきい値: ${var.copy_recordings_no_success_for}。ログの ERROR を確認する）"
+    },
+    {
+      # recording（録画中でスキップ）と ok は異常ではない
+      name      = "Copy-Recordings の失敗"
+      expr      = "max by (instance, reason) (copy_recordings_exit_reason{${local.copy_selector},reason=~\"config|epgstation|auth|failed|delete_stopped\"})"
+      evaluator = "gt"
+      threshold = 0
+      for       = var.copy_recordings_failed_for
+      panel     = "copy"
+      summary   = "{{ $labels.instance }} の Copy-Recordings が失敗した（reason: {{ $labels.reason }}。${var.copy_recordings_failed_for} 以上。ログを確認する）"
     },
   ]
 }
