@@ -21,8 +21,12 @@ Raspberry Pi のプロビジョニング用 IaC（Ansible）と、監視（Grafa
 │           ├── rpi-01.yml
 │           └── rpi-02.yml
 ├── scripts/
-│   └── Copy-Recordings.ps1   # SFTPGo の録画データを Windows PC のフォルダへコピー（移動）する（PowerShell）
-├── .env.ps1.example          # Copy-Recordings.ps1 の環境変数のテンプレート（コピーした .env.ps1 は Git 管理外）
+│   ├── Copy-Recordings.ps1   # SFTPGo の録画データを Windows PC のフォルダへコピー（移動）する。ログとメトリクスのファイルも書く（PowerShell）
+│   └── Install-Alloy.ps1     # Windows PC に Grafana Alloy を導入し、Copy-Recordings.ps1 のログとメトリクスを Grafana Cloud に送る
+├── windows/
+│   └── alloy/
+│       └── config.alloy.tmpl # Install-Alloy.ps1 が値を埋めて配置する Alloy の設定（Windows PC 用）
+├── .env.ps1.example          # Copy-Recordings.ps1・Install-Alloy.ps1 の環境変数のテンプレート（コピーした .env.ps1 は Git 管理外）
 ├── playbooks/
 │   ├── site.yml              # エントリポイント
 │   └── prepare_sd.yml        # 初回起動前に Mac 上で bootfs を準備する
@@ -393,6 +397,7 @@ SFTPGo の REST API から `SFTPGO_REMOTE_DIR`（既定 `/data`）を再帰的�
 | `RECORDINGS_DEST_DIR` | ○ | コピー先のフォルダ |
 | `EPGSTATION_BASE_URL` | ○ | 録画中の確認先。例: `http://192.168.10.55:8888`（`-SkipRecordingCheck` を付けるなら不要） |
 | `SFTPGO_REMOTE_DIR` | | コピー元（既定 `/data`。`encoder` で録画を移動するなら `/recorded`） |
+| `COPY_RECORDINGS_DATA_DIR` | | ログとメトリクスのフォルダ（既定 `%ProgramData%\CopyRecordings`。「実行結果を Grafana Cloud に送る」を参照） |
 
 ```powershell
 Copy-Item .env.ps1.example .env.ps1     # 値を書く（.env.ps1 は Git 管理外）
@@ -427,6 +432,69 @@ Copy-Item .env.ps1.example .env.ps1     # 値を書く（.env.ps1 は Git 管理
 - 認証を必須にする（匿名アクセスを許可しない）。`sftpgo_allowed_networks` で LAN に限定する
 - 削除・上書きの権限（`delete` / `overwrite` / `rename`）は必要なユーザーにだけ与える。API からの削除は取り消せない
 - Pi 上の処理（エンコードなど）と API が同じディレクトリに同時に書き込む場合は、書き込み先を分ける（例: API は `uploads/` に書く）
+
+### 実行結果を Grafana Cloud に送る（scripts/Install-Alloy.ps1）
+
+`Copy-Recordings.ps1` はログとメトリクスのファイルを書き出し、Windows に入れた Grafana Alloy が Grafana Cloud（Loki・Prometheus）に送る。ダッシュボード・アラート（Terraform）は Mac 側で管理する。
+
+```
+Copy-Recordings.ps1（タスクスケジューラ / SYSTEM）
+  ├─ <データフォルダ>\logs\copy-YYYYMMDD.log           → Alloy (loki.source.file)       → Loki
+  └─ <データフォルダ>\metrics\copy_recordings.prom     → Alloy (prometheus.exporter.windows の textfile) → Prometheus
+```
+
+データフォルダは `COPY_RECORDINGS_DATA_DIR`（既定 `%ProgramData%\CopyRecordings`）。`-WhatIf` では何も書かない。
+
+**ログ**（`logs\copy-YYYYMMDD.log`、30 日より古いものは実行時に削除）: 1 行が `<ISO 8601 の時刻> <INFO|WARN|ERROR> <メッセージ>`。Loki のラベルは `job="copy-recordings"`・`host`・`level`（ログの時刻をそのまま Loki の時刻にする）。
+
+**メトリクス**（`metrics\copy_recordings.prom`、実行の最後に毎回上書き。`job="copy-recordings"`・`instance=<PC 名>`）:
+
+| メトリクス | 内容 |
+|---|---|
+| `copy_recordings_last_run_timestamp_seconds` | 直近の実行が終わった時刻（Unix 秒）。**未実行の検知に使う** |
+| `copy_recordings_last_success_timestamp_seconds` | 直近の成功（終了コード 0）の時刻。失敗・録画中でスキップした実行では更新せず引き継ぐ。成功したことがなければ 0 |
+| `copy_recordings_last_success` | 直近の実行が成功なら 1、そうでなければ 0 |
+| `copy_recordings_files{result}` | 直近の実行の件数（`copied` / `skipped` / `deleted` / `failed`） |
+| `copy_recordings_bytes_copied` | 直近の実行でコピーしたバイト数 |
+| `copy_recordings_duration_seconds` | 直近の実行にかかった秒数 |
+| `copy_recordings_exit_reason{reason}` | 終わり方。該当する 1 つが 1、ほかは 0 |
+| `windows_textfile_mtime_seconds` / `windows_textfile_scrape_error` | `.prom` の更新時刻・読み込みエラー（exporter が付ける） |
+
+`reason` の値: `ok`（成功）/ `recording`（録画中でコピーしなかった。異常ではない）/ `config`（環境変数の不足など）/ `epgstation`（EPGStation に接続できない）/ `auth`（SFTPGo の認証エラー）/ `failed`（失敗したファイルがある）/ `delete_stopped`（録画が始まったので削除を止めた）。タスクスケジューラの再試行（10 分おき、3 回）で、`recording` の後に `ok` になることがある。
+
+Alloy の導入（初回だけ。管理者権限の PowerShell で）:
+
+1. Grafana Cloud の Cloud access policies で、Realm をスタック、スコープを **metrics:write と logs:write だけ**にしたポリシーを作り、トークンを発行する（Pi 用や Terraform 用のトークンとは分ける）
+2. grafana.com の My Account → スタック → Prometheus と Loki の「Details」で、URL と Username / Instance ID（数字）を確認する
+3. `.env.ps1` に `GRAFANA_CLOUD_*` を書く（`.env.ps1.example` を参照。`.env.ps1` は Git 管理外）
+4. 実行する
+
+```powershell
+.\scripts\Install-Alloy.ps1
+```
+
+- `<データフォルダ>\alloy\config.alloy`（`windows\alloy\config.alloy.tmpl` から作る）と `<データフォルダ>\alloy\grafana-cloud-token` を書く。このフォルダは SYSTEM と Administrators だけが読める
+- Alloy が未導入なら、GitHub の公式リリース（既定 `1.20.1`。Pi と同じ）をダウンロードし、`SHA256SUMS` で検証してからサイレントインストールする（サービス `Alloy`、LocalSystem、匿名の利用統計は無効）。導入済みなら設定を書き直してサービスを再起動するだけで、バージョンは変えない
+- `alloy validate` で設定を検証し、Grafana Cloud への送信が始まるのを確認する（2 分待って 401 などで送れなければ失敗にする）
+- 何度実行してもよい（トークンや URL を変えたときも再実行する）
+- 送信されたか確認するには、Grafana Cloud の Explore で `{job="copy-recordings"}`（Loki・Prometheus）を指定する。`copy_recordings_*` は、`Copy-Recordings.ps1` を 1 回実行してから約 1 分後に見える
+
+タスクスケジューラへの登録（例。管理者権限の PowerShell で。SYSTEM で実行するので、データフォルダの既定は `C:\ProgramData\CopyRecordings`）:
+
+```powershell
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+  -Argument '-NoProfile -ExecutionPolicy Bypass -File "C:\projects\MyProducts\raspberry-pi\scripts\Copy-Recordings.ps1" -DeleteAfterCopy'
+$trigger = New-ScheduledTaskTrigger -Daily -At 3:00am
+$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+$settings = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable `
+  -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 10) `
+  -ExecutionTimeLimit (New-TimeSpan -Hours 6)
+Register-ScheduledTask -TaskName 'MyTasks\CopyRecordings' -Action $action -Trigger $trigger `
+  -Principal $principal -Settings $settings
+```
+
+- 運用: スクリプトが `.env.ps1`（リポジトリ直下）を読むので、SYSTEM で実行するならそのファイルを SYSTEM が読めるようにしておく（ユーザーのフォルダ配下に置かない）
+- ログとメトリクスの出力先は、スクリプトと Alloy の設定（`DATA_DIR`）で同じにする。`COPY_RECORDINGS_DATA_DIR` を変えたら `Install-Alloy.ps1` も再実行する
 
 ## 録画サーバー（roles/epgstation）
 

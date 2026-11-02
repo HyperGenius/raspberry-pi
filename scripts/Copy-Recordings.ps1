@@ -14,12 +14,17 @@ Files named ".sftpgo-upload.*" (uploads in progress) are ignored.
 Settings come from environment variables. If .env.ps1 exists in the repository root
 (git-ignored; see .env.ps1.example) it is loaded first.
 
-  SFTPGO_BASE_URL      required  e.g. http://192.168.10.55:8080
-  SFTPGO_USER          required
-  SFTPGO_PASSWORD      required
-  RECORDINGS_DEST_DIR  required  local destination folder
-  EPGSTATION_BASE_URL  required  e.g. http://192.168.10.55:8888 (not needed with -SkipRecordingCheck)
-  SFTPGO_REMOTE_DIR    optional  source folder on SFTPGo (default /data)
+  SFTPGO_BASE_URL           required  e.g. http://192.168.10.55:8080
+  SFTPGO_USER               required
+  SFTPGO_PASSWORD           required
+  RECORDINGS_DEST_DIR       required  local destination folder
+  EPGSTATION_BASE_URL       required  e.g. http://192.168.10.55:8888 (not needed with -SkipRecordingCheck)
+  SFTPGO_REMOTE_DIR         optional  source folder on SFTPGo (default /data)
+  COPY_RECORDINGS_DATA_DIR  optional  where the log and metrics files go (default %ProgramData%\CopyRecordings)
+
+Each run appends to <data dir>\logs\copy-YYYYMMDD.log (files older than 30 days are deleted) and, when it ends,
+rewrites <data dir>\metrics\copy_recordings.prom (Prometheus text format, read by Grafana Alloy's textfile collector).
+Nothing is written with -WhatIf.
 
 .PARAMETER SkipRecordingCheck
 Copy without checking EPGStation for an active recording. Cannot be combined with -DeleteAfterCopy.
@@ -41,22 +46,122 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'  # Invoke-WebRequest is slow with the progress bar on Windows PowerShell 5.1
-
-if ($DeleteAfterCopy -and $SkipRecordingCheck) {
-    Write-Error '-DeleteAfterCopy cannot be combined with -SkipRecordingCheck (a file being recorded could be deleted)' -ErrorAction Continue
-    exit 1
-}
+$script:stopwatch = [Diagnostics.Stopwatch]::StartNew()
 
 $envFile = Join-Path $PSScriptRoot '..\.env.ps1'
 if (Test-Path -LiteralPath $envFile) { . $envFile }
+
+$script:copied = 0
+$script:skipped = 0
+$script:deleted = 0
+$script:failed = 0
+$script:bytesCopied = [int64]0
+$script:deleteStopped = $false
+$script:authFailed = $false
+
+# ---- log and metrics files ----
+$dataDir = if ($env:COPY_RECORDINGS_DATA_DIR) { $env:COPY_RECORDINGS_DATA_DIR } else { Join-Path $env:ProgramData 'CopyRecordings' }
+$dataDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($dataDir)
+$logDir = Join-Path $dataDir 'logs'
+$metricsFile = Join-Path $dataDir 'metrics\copy_recordings.prom'
+$logRetentionDays = 30
+$script:logFile = $null
+$utf8 = New-Object System.Text.UTF8Encoding $false  # no BOM: Alloy and windows_exporter read the files as they are
+
+if (-not $WhatIfPreference) {
+    try {
+        [IO.Directory]::CreateDirectory($logDir) | Out-Null
+        [IO.Directory]::CreateDirectory((Split-Path $metricsFile)) | Out-Null
+        $script:logFile = Join-Path $logDir ('copy-{0}.log' -f (Get-Date -Format 'yyyyMMdd'))
+        Get-ChildItem -LiteralPath $logDir -Filter 'copy-*.log' -File |
+            Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$logRetentionDays) } |
+            Remove-Item -Force -Confirm:$false -ErrorAction SilentlyContinue  # may be held open by Alloy; retried next run
+    } catch {
+        $script:logFile = $null
+        Write-Warning "Could not prepare the log folder $logDir (no log file or metrics will be written): $($_.Exception.Message)"
+    }
+}
+
+# Writes to the console and appends "<ISO 8601 time> <LEVEL> <message>" to today's log file.
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR')][string]$Level = 'INFO')
+    switch ($Level) {
+        'WARN'  { Write-Warning $Message }
+        'ERROR' { Write-Error $Message -ErrorAction Continue }
+        default { Write-Host $Message }
+    }
+    if ($script:logFile) {
+        $line = '{0} {1} {2}' -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:sszzz'), $Level, ($Message -replace '\r?\n', ' | ')
+        try { [IO.File]::AppendAllText($script:logFile, $line + "`n", $utf8) } catch { }
+    }
+}
+
+# Rewrites the .prom file atomically (windows_exporter must never see a half-written file).
+function Write-Metrics([string]$reason, [int]$code) {
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $lastSuccess = [int64]0
+    if ($code -eq 0) {
+        $lastSuccess = $now
+    } elseif (Test-Path -LiteralPath $metricsFile) {
+        # Keep the time of the last success across failed runs (and runs skipped because of a recording).
+        $m = [regex]::Match((Get-Content -LiteralPath $metricsFile -Raw), '(?m)^copy_recordings_last_success_timestamp_seconds (\d+)')
+        if ($m.Success) { $lastSuccess = [int64]$m.Groups[1].Value }
+    }
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add('# HELP copy_recordings_last_run_timestamp_seconds Unix time when the last run ended.')
+    $lines.Add('# TYPE copy_recordings_last_run_timestamp_seconds gauge')
+    $lines.Add("copy_recordings_last_run_timestamp_seconds $now")
+    $lines.Add('# HELP copy_recordings_last_success_timestamp_seconds Unix time of the last run that exited with 0 (0 if never).')
+    $lines.Add('# TYPE copy_recordings_last_success_timestamp_seconds gauge')
+    $lines.Add("copy_recordings_last_success_timestamp_seconds $lastSuccess")
+    $lines.Add('# HELP copy_recordings_last_success 1 if the last run exited with 0, otherwise 0.')
+    $lines.Add('# TYPE copy_recordings_last_success gauge')
+    $lines.Add("copy_recordings_last_success $(if ($code -eq 0) { 1 } else { 0 })")
+    $lines.Add('# HELP copy_recordings_files Files handled by the last run, by result.')
+    $lines.Add('# TYPE copy_recordings_files gauge')
+    foreach ($kv in @(@('copied', $script:copied), @('skipped', $script:skipped), @('deleted', $script:deleted), @('failed', $script:failed))) {
+        $lines.Add("copy_recordings_files{result=`"$($kv[0])`"} $($kv[1])")
+    }
+    $lines.Add('# HELP copy_recordings_bytes_copied Bytes copied by the last run.')
+    $lines.Add('# TYPE copy_recordings_bytes_copied gauge')
+    $lines.Add("copy_recordings_bytes_copied $script:bytesCopied")
+    $lines.Add('# HELP copy_recordings_duration_seconds Duration of the last run.')
+    $lines.Add('# TYPE copy_recordings_duration_seconds gauge')
+    $lines.Add('copy_recordings_duration_seconds ' + [math]::Round($script:stopwatch.Elapsed.TotalSeconds, 1).ToString($inv))
+    $lines.Add('# HELP copy_recordings_exit_reason 1 for how the last run ended, 0 for the others.')
+    $lines.Add('# TYPE copy_recordings_exit_reason gauge')
+    foreach ($r in 'ok', 'recording', 'config', 'epgstation', 'auth', 'failed', 'delete_stopped') {
+        $lines.Add("copy_recordings_exit_reason{reason=`"$r`"} $(if ($r -eq $reason) { 1 } else { 0 })")
+    }
+    $tmp = $metricsFile + '.tmp'
+    [IO.File]::WriteAllText($tmp, (($lines -join "`n") + "`n"), $utf8)
+    Move-Item -LiteralPath $tmp -Destination $metricsFile -Force -Confirm:$false
+}
+
+# Every exit goes through here so that the metrics are always written.
+# reason: ok | recording | config | epgstation | auth | failed | delete_stopped
+function Complete-Run([string]$reason, [int]$code) {
+    if ($script:logFile) {
+        try { Write-Metrics $reason $code } catch { Write-Warning "Could not write $metricsFile : $($_.Exception.Message)" }
+    }
+    exit $code
+}
+
+Write-Log "Start: DeleteAfterCopy=$([bool]$DeleteAfterCopy) SkipRecordingCheck=$([bool]$SkipRecordingCheck) WhatIf=$([bool]$WhatIfPreference)"
+
+if ($DeleteAfterCopy -and $SkipRecordingCheck) {
+    Write-Log '-DeleteAfterCopy cannot be combined with -SkipRecordingCheck (a file being recorded could be deleted)' ERROR
+    Complete-Run 'config' 1
+}
 
 $required = @('SFTPGO_BASE_URL', 'SFTPGO_USER', 'SFTPGO_PASSWORD', 'RECORDINGS_DEST_DIR')
 if (-not $SkipRecordingCheck) { $required += 'EPGSTATION_BASE_URL' }
 $missing = $required |
     Where-Object { -not [Environment]::GetEnvironmentVariable($_) }
 if ($missing) {
-    Write-Error "Missing environment variables: $($missing -join ', ') (see .env.ps1.example)" -ErrorAction Continue
-    exit 1
+    Write-Log "Missing environment variables: $($missing -join ', ') (see .env.ps1.example)" ERROR
+    Complete-Run 'config' 1
 }
 
 $baseUrl = $env:SFTPGO_BASE_URL.TrimEnd('/')
@@ -74,6 +179,7 @@ function Get-AuthHeader {
         try {
             $res = Invoke-RestMethod -Uri "$baseUrl/api/v2/user/token" -Headers @{ Authorization = "Basic $basic" }
         } catch {
+            $script:authFailed = $true
             throw "Authentication failed (check SFTPGO_BASE_URL, SFTPGO_USER and SFTPGO_PASSWORD): $($_.Exception.Message)"
         }
         $script:token = $res.access_token
@@ -117,12 +223,6 @@ function Get-ActiveRecordings {
     return Invoke-RestMethod -Uri $uri
 }
 
-$script:copied = 0
-$script:skipped = 0
-$script:deleted = 0
-$script:failed = 0
-$script:deleteStopped = $false
-
 # Deletes a remote file whose local copy is complete, unless a recording has started since the last check.
 function Remove-RemoteFile {
     [CmdletBinding(SupportsShouldProcess = $true)]
@@ -131,22 +231,22 @@ function Remove-RemoteFile {
     try {
         $recording = Get-ActiveRecordings
     } catch {
-        Write-Warning "Could not check EPGStation for active recordings; no more files will be deleted: $($_.Exception.Message)"
+        Write-Log "Could not check EPGStation for active recordings; no more files will be deleted: $($_.Exception.Message)" WARN
         $script:deleteStopped = $true
         return
     }
     if ([int]$recording.total -gt 0) {
-        Write-Warning "EPGStation started recording ($($recording.total)); no more files will be deleted"
+        Write-Log "EPGStation started recording ($($recording.total)); no more files will be deleted" WARN
         $script:deleteStopped = $true
         return
     }
     try {
         $uri = "$baseUrl/api/v2/user/files?path=$([uri]::EscapeDataString($remotePath))"
         Invoke-RestMethod -Method Delete -Uri $uri -Headers (Get-AuthHeader) | Out-Null
-        Write-Host "Deleted $remotePath"
+        Write-Log "Deleted $remotePath"
         $script:deleted++
     } catch {
-        Write-Warning "Failed to delete: $remotePath : $($_.Exception.Message)"
+        Write-Log "Failed to delete: $remotePath : $($_.Exception.Message)" WARN
         $script:failed++
     }
 }
@@ -159,7 +259,7 @@ function Copy-Directory {
         if ($name.StartsWith('.sftpgo-upload.')) { continue }  # an upload in progress (written by SFTPGo, renamed when done)
         # Never let a remote name escape the destination folder.
         if (-not $name -or $name -eq '.' -or $name -eq '..' -or $name -match '[\/:*?"<>|]') {
-            Write-Warning "Skipping unsafe name: $remote/$name"
+            Write-Log "Skipping unsafe name: $remote/$name" WARN
             $script:failed++
             continue
         }
@@ -171,7 +271,7 @@ function Copy-Directory {
                 if (-not $WhatIfPreference) { [IO.Directory]::CreateDirectory($localPath) | Out-Null }
                 Copy-Directory $remotePath $localPath
             } catch {
-                Write-Warning "Failed: $remotePath : $($_.Exception.Message)"
+                Write-Log "Failed: $remotePath : $($_.Exception.Message)" WARN
                 $script:failed++
             }
             continue
@@ -192,7 +292,7 @@ function Copy-Directory {
         # A fixed, wildcard-free temporary name: recording names contain [ ], which -OutFile may treat as a pattern.
         $part = Join-Path $local '.download.part'
         try {
-            Write-Host "Copying $remotePath"
+            Write-Log "Copying $remotePath ($($entry.size) bytes)"
             $uri = "$baseUrl/api/v2/user/files?path=$([uri]::EscapeDataString($remotePath))"
             Save-RemoteFile $uri $part
             if ((Get-Item -LiteralPath $part).Length -ne [int64]$entry.size) {
@@ -200,8 +300,9 @@ function Copy-Directory {
             }
             Move-Item -LiteralPath $part -Destination $localPath -Force -Confirm:$false
             $script:copied++
+            $script:bytesCopied += [int64]$entry.size
         } catch {
-            Write-Warning "Failed: $remotePath : $($_.Exception.Message)"
+            Write-Log "Failed: $remotePath : $($_.Exception.Message)" WARN
             Remove-Item -LiteralPath $part -Force -Confirm:$false -ErrorAction SilentlyContinue
             $script:failed++
             continue
@@ -214,25 +315,26 @@ if (-not $SkipRecordingCheck) {
     try {
         $recording = Get-ActiveRecordings
     } catch {
-        Write-Error "Could not check EPGStation for active recordings (check EPGSTATION_BASE_URL): $($_.Exception.Message)" -ErrorAction Continue
-        exit 1
+        Write-Log "Could not check EPGStation for active recordings (check EPGSTATION_BASE_URL): $($_.Exception.Message)" ERROR
+        Complete-Run 'epgstation' 1
     }
     if ([int]$recording.total -gt 0) {
-        Write-Warning "EPGStation is recording ($($recording.total)); nothing was copied:"
-        foreach ($r in @($recording.records)) { Write-Warning "  $($r.name)" }
-        exit 1
+        Write-Log "EPGStation is recording ($($recording.total)); nothing was copied:" WARN
+        foreach ($r in @($recording.records)) { Write-Log "  $($r.name)" WARN }
+        Complete-Run 'recording' 1
     }
-    Write-Host 'No recording in progress.'
+    Write-Log 'No recording in progress.'
 }
 
 try {
     if (-not $WhatIfPreference) { [IO.Directory]::CreateDirectory($destRoot) | Out-Null }
     Copy-Directory $remoteRoot $destRoot
 } catch {
-    Write-Error $_.Exception.Message -ErrorAction Continue
-    exit 1
+    Write-Log $_.Exception.Message ERROR
+    Complete-Run $(if ($script:authFailed) { 'auth' } else { 'failed' }) 1
 }
 
-Write-Host "Done: copied $script:copied, skipped $script:skipped, deleted $script:deleted, failed $script:failed"
-if ($script:deleteStopped) { Write-Warning 'Deleting was stopped; re-run when no recording is in progress to delete the remaining files.' }
-if ($script:failed -gt 0 -or $script:deleteStopped) { exit 1 }
+Write-Log "Done: copied $script:copied, skipped $script:skipped, deleted $script:deleted, failed $script:failed ($script:bytesCopied bytes copied)"
+if ($script:deleteStopped) { Write-Log 'Deleting was stopped; re-run when no recording is in progress to delete the remaining files.' WARN }
+$reason = if ($script:authFailed) { 'auth' } elseif ($script:failed -gt 0) { 'failed' } elseif ($script:deleteStopped) { 'delete_stopped' } else { 'ok' }
+Complete-Run $reason $(if ($reason -eq 'ok') { 0 } else { 1 })

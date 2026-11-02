@@ -1,0 +1,97 @@
+// Copy-Recordings.ps1 の結果とログを Grafana Cloud に送る（scripts/Install-Alloy.ps1 が @@...@@ を置き換えて配置する）
+logging {
+  level = "warn"
+}
+
+// ---- メトリクス: Copy-Recordings.ps1 が書き出す .prom（copy_recordings_*）----
+prometheus.exporter.windows "copy_recordings" {
+  // textfile 以外のコレクタ（cpu・os など）は送らない
+  enabled_collectors = ["textfile"]
+
+  textfile {
+    directories = ["@@DATA_DIR@@/metrics"]
+  }
+}
+
+discovery.relabel "copy_recordings" {
+  targets = prometheus.exporter.windows.copy_recordings.targets
+
+  rule {
+    target_label = "instance"
+    replacement  = constants.hostname
+  }
+
+  rule {
+    target_label = "job"
+    replacement  = "copy-recordings"
+  }
+}
+
+prometheus.scrape "copy_recordings" {
+  targets         = discovery.relabel.copy_recordings.output
+  scrape_interval = "60s"  // Grafana Cloud の 1 DPM に合わせる。短くしない
+  forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+// ---- ログ: Copy-Recordings.ps1 が書くログファイル ----
+// 行の形式: <ISO 8601 の時刻> <INFO|WARN|ERROR> <メッセージ>
+local.file_match "copy_recordings" {
+  path_targets = [{
+    "__path__" = "@@DATA_DIR@@/logs/copy-*.log",
+    "job"      = "copy-recordings",
+    "host"     = constants.hostname,
+  }]
+}
+
+loki.source.file "copy_recordings" {
+  targets    = local.file_match.copy_recordings.targets
+  forward_to = [loki.process.copy_recordings.receiver]
+}
+
+loki.process "copy_recordings" {
+  forward_to = [loki.write.grafana_cloud.receiver]
+
+  stage.regex {
+    expression = "^(?P<ts>\\S+) (?P<level>INFO|WARN|ERROR) "
+  }
+
+  // 取り込んだ時刻ではなく、ログに書かれた時刻を使う
+  stage.timestamp {
+    source = "ts"
+    format = "RFC3339"
+  }
+
+  stage.labels {
+    values = {
+      level = "",
+    }
+  }
+}
+
+// ---- 送信（Grafana Cloud）----
+local.file "grafana_cloud_token" {
+  filename  = "@@TOKEN_FILE@@"
+  is_secret = true
+}
+
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = "@@PROMETHEUS_URL@@"
+
+    basic_auth {
+      username = "@@PROMETHEUS_USERNAME@@"
+      password = local.file.grafana_cloud_token.content
+    }
+  }
+}
+
+loki.write "grafana_cloud" {
+  endpoint {
+    url = "@@LOKI_URL@@"
+
+    basic_auth {
+      username = "@@LOKI_USERNAME@@"
+      password = local.file.grafana_cloud_token.content
+    }
+  }
+}
