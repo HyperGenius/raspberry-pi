@@ -504,7 +504,7 @@ Register-ScheduledTask -TaskName 'MyTasks\CopyRecordings' -Action $action -Trigg
 ```powershell
 # 管理者権限の PowerShell で（トリガーなし。Copy-Recordings.ps1 -SleepAfter が起動する）
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-  -Argument '-NoProfile -ExecutionPolicy Bypass -File "C:\projects\MyProductsaspberry-pi\scripts\Sleep-Computer.ps1"'
+  -Argument '-NoProfile -ExecutionPolicy Bypass -File "C:\projects\MyProducts\raspberry-pi\scripts\Sleep-Computer.ps1"'
 $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 1)
 Register-ScheduledTask -TaskName 'MyTasks\SleepAfterCopy' -Action $action -Principal $principal -Settings $settings

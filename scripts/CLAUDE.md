@@ -10,6 +10,8 @@
 - `exit_reason` の値と `copy_recordings_*` の名前は Terraform が使う契約。増減は Mac 側と合わせる（ルートの CLAUDE.md）
 - `Copy-Recordings.ps1` の中でスリープしない。`-SleepAfter` は別タスク（`Sleep-Computer.ps1`）を起動するだけ
 - SYSTEM のタスクで動くスクリプトは、失敗が画面に出ない。起動直後にログを 1 行書き、`trap` で失敗をログに残す（`Sleep-Computer.ps1` が最初の実機の実行で何も残さず、原因を後から追えなかった）
+- ドキュメントに Windows のパス（`C:\projects\MyProductsaspberry-pi\...`）を書くとき、スクリプトや here-document 経由で書くと `` `	` `
+` が制御文字になって消える（README の `SleepAfterCopy` 登録例で `raspberry-pi` の `` が欠け、タスクが 2 回続けて起動に失敗した）。書いたあとに `grep` でパスを確認し、Edit ツールで直す
 - 電源・復帰まわりの文言は環境で違う。タイマー復帰は、この PC では `Device -ACPI Wake Alarm`（タスク名は出ない）。推測で書かず、システムログの実物（`Get-WinEvent`、Power-Troubleshooter ID 1）で確かめる
 
 ## 検証の落とし穴
