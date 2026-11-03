@@ -156,6 +156,12 @@ function Complete-Run([string]$reason, [int]$code) {
         try {
             Start-ScheduledTask -TaskPath '\MyTasks' -TaskName 'SleepAfterCopy'
             Write-Log 'Started the SleepAfterCopy task'
+            # The task has no console, so record what the scheduler says about it (a result other than 0x41301/0x0 means it did not run the script).
+            Start-Sleep -Seconds 5
+            $sleepTask = Get-ScheduledTask -TaskPath '\MyTasks' -TaskName 'SleepAfterCopy'
+            $sleepInfo = $sleepTask | Get-ScheduledTaskInfo
+            $sleepAction = $sleepTask.Actions | Select-Object -First 1
+            Write-Log ('SleepAfterCopy: state={0} lastRun={1:s} lastResult=0x{2:X} action={3} {4}' -f $sleepTask.State, $sleepInfo.LastRunTime, $sleepInfo.LastTaskResult, $sleepAction.Execute, $sleepAction.Arguments)
         } catch {
             Write-Log "Could not start the SleepAfterCopy task (register it first; see README): $($_.Exception.Message)" WARN
         }
