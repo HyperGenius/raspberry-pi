@@ -515,11 +515,11 @@ $task.Actions[0].Arguments += ' -SleepAfter'
 Set-ScheduledTask -InputObject $task
 ```
 
-- スリープするのは、**直近の復帰が `MyTasks\CopyRecordings` タスクによるもの**（システムログの Power-Troubleshooter ID 1 の「スリープ状態の解除元」にタスク名がある。8 時間以内）のときだけ。すでに起きていた PC や、自分で起こした PC（電源ボタン・Wi-Fi など）はそのままにする
+- スリープするのは、**直近の復帰がタイマー（RTC のアラーム）によるもの**のとき（システムログの Power-Troubleshooter ID 1 の「スリープ状態の解除元」が `Wake Alarm` または `Timer`、または `MyTasks\CopyRecordings` タスクの名前を含む。8 時間以内）だけ。すでに起きていた PC や、自分で起こした PC（電源ボタン・キーボード・Wi-Fi など）はそのままにする。タスク以外のタイマーで起きた場合も同じ扱いになる
 - 起こしたタスクの後でも、Alloy が最後のログとメトリクスを送れるよう、既定で 120 秒待ってからスリープする（`-DelaySeconds`）
 - キーボード・マウスの入力が `-MinIdleMinutes`（既定 10）以内なら、スリープしない（リモートデスクトップなど入力時刻が取れるセッションだけ。コンソールのセッションでは取れないことが多く、3:00 に起こされた後で使い始めた場合はスリープすることがある）
 - 録画中でスキップした実行（`reason="recording"`）では起動しない。タスクの再試行（10 分おき）が走るため。再試行が尽きた場合は起きたままになる（Windows 既定のスリープ設定に任せる）
-- 判定とスリープの結果は、同じログに `sleep:` 付きの行で残る（`Not sleeping: ...` / `Going to sleep`）
+- 判定とスリープの結果は、同じログに `sleep:` 付きの行で残る（`Started as ...` → `Not sleeping: ...` / `Going to sleep`）。`Started as ...` の行すら出ないときは、タスクが起動していない（タスクの「前回の実行結果」を見る）。途中で失敗したときは `Failed at line N: ...` が出る
 - 動作確認: `.\scripts\Sleep-Computer.ps1 -WhatIf`（待たず、スリープもしない）
 
 ## 録画サーバー（roles/epgstation）

@@ -7,9 +7,11 @@ Meant to run as the scheduled task \MyTasks\SleepAfterCopy (SYSTEM, no trigger),
 when it finishes. It is a separate task because a process that sleeps is frozen until the next wake: if Copy-Recordings.ps1
 itself slept, its task would still be "running" at the next trigger and the next run would not start.
 
-  1. Sleeps only if the PC was woken by the scheduled task: the latest "resumed from a low-power state" event
+  1. Sleeps only if the PC was woken by a timer: the latest "resumed from a low-power state" event
      (System log, Microsoft-Windows-Power-Troubleshooter, ID 1) is at most -MaxWakeAgeHours old and its wake source
-     names -WakeTaskName. A PC that was already awake (or that you woke yourself) is left alone.
+     matches -WakeSourcePattern (an RTC alarm, "Device -ACPI Wake Alarm", on the PC this was built on; the source
+     does not name the task there) or names -WakeTaskName. A PC that was already awake (or that you woke yourself,
+     by the power button, a keyboard or the network adapter) is left alone.
   2. Waits -DelaySeconds so that Grafana Alloy can send the final log and metrics (its scrape interval is 60 s).
   3. Skips sleeping if a logon session has had keyboard/mouse input in the last -MinIdleMinutes
      (only reported by some sessions, e.g. remote desktop; the console session often reports none).
@@ -26,6 +28,7 @@ param(
     [int]$DelaySeconds = 120,
     [int]$MinIdleMinutes = 10,
     [string]$WakeTaskName = 'MyTasks\CopyRecordings',
+    [string]$WakeSourcePattern = 'Wake Alarm|Timer',
     [int]$MaxWakeAgeHours = 8
 )
 
@@ -48,6 +51,13 @@ function Write-Log([string]$Message, [string]$Level = 'INFO') {
         [IO.File]::AppendAllText($file, $line + "`n", $utf8)
     } catch { }
 }
+
+# Anything that goes wrong from here on is written to the log (the task has no console to read).
+trap {
+    Write-Log "Failed at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)" ERROR
+    exit 1
+}
+Write-Log "Started as $env:USERNAME (PowerShell $($PSVersionTable.PSVersion))"
 
 Add-Type -TypeDefinition @'
 using System;
@@ -114,7 +124,7 @@ public static class SleepHelper
 }
 '@
 
-# Was the PC woken by the Copy-Recordings task? (the wake source reads "... execute 'NT TASK\MyTasks\CopyRecordings' scheduled task ...")
+# Was the PC woken by a timer? The source is "Device -ACPI Wake Alarm" here, or "Timer - Windows will execute 'NT TASK\<task>' ..." elsewhere.
 try {
     $wake = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Power-Troubleshooter'; Id = 1 } -MaxEvents 1
 } catch {
@@ -122,9 +132,9 @@ try {
     exit 1
 }
 $wakeAge = if ($wake) { (Get-Date) - $wake.TimeCreated } else { [TimeSpan]::MaxValue }
-if (-not $wake -or $wakeAge.TotalHours -gt $MaxWakeAgeHours -or -not $wake.Message.Contains("NT TASK\$WakeTaskName")) {
+if (-not $wake -or $wakeAge.TotalHours -gt $MaxWakeAgeHours -or -not ($wake.Message -match $WakeSourcePattern -or $wake.Message.Contains("NT TASK\$WakeTaskName"))) {
     $source = if ($wake) { $m = $wake.Message -replace '\s+', ' '; $m.Substring([Math]::Max(0, $m.Length - 100)) } else { 'no wake event' }
-    Write-Log "Not sleeping: the PC was not woken by the $WakeTaskName task (latest wake: $(if ($wake) { $wake.TimeCreated.ToString('s') } else { '-' }); $source)"
+    Write-Log "Not sleeping: the PC was not woken by a timer (latest wake: $(if ($wake) { $wake.TimeCreated.ToString('s') } else { '-' }); $source)"
     exit 0
 }
 

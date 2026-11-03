@@ -9,6 +9,8 @@
 - `-WhatIf` ではファイルを書かない（ログ・メトリクス・コピー・削除のどれも）
 - `exit_reason` の値と `copy_recordings_*` の名前は Terraform が使う契約。増減は Mac 側と合わせる（ルートの CLAUDE.md）
 - `Copy-Recordings.ps1` の中でスリープしない。`-SleepAfter` は別タスク（`Sleep-Computer.ps1`）を起動するだけ
+- SYSTEM のタスクで動くスクリプトは、失敗が画面に出ない。起動直後にログを 1 行書き、`trap` で失敗をログに残す（`Sleep-Computer.ps1` が最初の実機の実行で何も残さず、原因を後から追えなかった）
+- 電源・復帰まわりの文言は環境で違う。タイマー復帰は、この PC では `Device -ACPI Wake Alarm`（タスク名は出ない）。推測で書かず、システムログの実物（`Get-WinEvent`、Power-Troubleshooter ID 1）で確かめる
 
 ## 検証の落とし穴
 - **`.env.ps1` は環境変数を上書きする**（スクリプトが読み込む）。テストで環境変数を渡しても、リポジトリ直下に `.env.ps1` があると本物の SFTPGo・EPGStation に接続する。テストはスクリプトをスクラッチに複製して（`<tmp>/scripts/` に置けば `..\.env.ps1` が見つからない）、モックの HTTP サーバー（SFTPGo の `/api/v2/user/token` `dirs` `files`、EPGStation の `/api/recording`）に向ける。**`-DeleteAfterCopy` を本物に向けて試さない**
