@@ -47,7 +47,9 @@
 - スリープを別タスクにしている理由: スリープすると、そのプロセスは次の復帰まで止まる。`Copy-Recordings.ps1` 自身がスリープすると、翌日 3:00 に前回のタスクが「実行中」のままで、新しい実行が始まらない
 - スリープする条件: ①直近の復帰イベント（System ログ、`Microsoft-Windows-Power-Troubleshooter`、ID 1）が `-MaxWakeAgeHours`（8）以内で、メッセージに `NT TASK\MyTasks\CopyRecordings` を含む ②待ったあと、入力が `-MinIdleMinutes`（10）以内のセッションがない
 - ①の判定は、復帰元の文言に頼る。この PC のタイマー復帰は `Device -ACPI Wake Alarm`（RTC のアラーム）で、**タスク名は出ない**ので、`-WakeSourcePattern`（既定 `Wake Alarm|Timer`）に合うか、`NT TASK\<タスクパス>` を含むかで判定する。電源ボタンや Wi-Fi（`Device -Intel(R) Wi-Fi ...`）の復帰は「スリープしない」と判定されることまで確認済み。限界: タスク以外のタイマー（別のスケジュールタスクなど）で起きた場合も「タイマー復帰」になる
-- 2026-11-03 3:02 の最初の実機の実行では、`Started the SleepAfterCopy task` の後に `sleep:` の行が一切なく、スリープしなかった。復帰元がタスク名を含まなかったのは判明したが、それだけなら「Not sleeping」のログが出るはずで、**起動できなかった、または最初のログの前に落ちた可能性が残る**。そのため起動直後に必ず `Started as ...` を書き、`trap` で失敗を `Failed at line N: ...` としてログに残すようにした。次の 3:00 の後に、ログと、タスクの「前回の実行結果」（管理者権限で `Get-ScheduledTaskInfo`）を確認する。**タイマー復帰で実際にスリープするところは、まだ確認できていない**
+- 実機で確認済み（2026-11-06 3:00）: タイマー復帰 → コピー → `sleep: Started as SYSTEM` → 120 秒待つ → `Going to sleep` → スリープ。それまでの 2 回（11/03・11/04）スリープしなかった原因は、README の登録コマンドのパスが壊れていて（`raspberry-pi` の `` が消えていた）、タスクがスクリプトを見つけられなかったこと。タスクの `LastTaskResult` が大きな値（`4294770688`）なら、起動前に失敗している
+- `Get-ScheduledTask` の `-TaskPath` は前後に `\` が必要（`'\MyTasks'`）。`Start-ScheduledTask` は末尾の `\` がなくても通るので、片方だけ試して安心しない
+- この PC では、復帰が 3:00 ちょうどにならない（2〜8 分遅れる）ことがある。復帰タイマー自体は `\MyTasks\CopyRecordings` で正しく登録される（`powercfg /waketimers`）。11/05 は、復帰したのにタスクが起動しなかった（原因は未特定。タスクスケジューラの履歴を `wevtutil set-log Microsoft-Windows-TaskScheduler/Operational /enabled:true` で有効にしてある）
 - ②は補助。コンソールセッションでは `WTSINFO.LastInputTime` が 0 で取れない（`no input`）ので、ブロックしない扱い。取れるのはリモートデスクトップなど
 - `SetSuspendState(false, false, false)`（第 1 引数 false = スリープ。休止ではない）。`rundll32 powrprof.dll,SetSuspendState` は引数の癖で休止になることがあるので使わない
 - 判定にはメディア再生などの検出を含まない
