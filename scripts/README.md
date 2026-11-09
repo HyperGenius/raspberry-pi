@@ -49,7 +49,9 @@
 - ①の判定は、復帰元の文言に頼る。この PC のタイマー復帰は `Device -ACPI Wake Alarm`（RTC のアラーム）で、**タスク名は出ない**ので、`-WakeSourcePattern`（既定 `Wake Alarm|Timer`）に合うか、`NT TASK\<タスクパス>` を含むかで判定する。電源ボタンや Wi-Fi（`Device -Intel(R) Wi-Fi ...`）の復帰は「スリープしない」と判定されることまで確認済み。限界: タスク以外のタイマー（別のスケジュールタスクなど）で起きた場合も「タイマー復帰」になる
 - 実機で確認済み（2026-11-06 3:00）: タイマー復帰 → コピー → `sleep: Started as SYSTEM` → 120 秒待つ → `Going to sleep` → スリープ。それまでの 2 回（11/03・11/04）スリープしなかった原因は、README の登録コマンドのパスが壊れていて（`raspberry-pi` の `` が消えていた）、タスクがスクリプトを見つけられなかったこと。タスクの `LastTaskResult` が大きな値（`4294770688`）なら、起動前に失敗している
 - `Get-ScheduledTask` の `-TaskPath` は前後に `\` が必要（`'\MyTasks'`）。`Start-ScheduledTask` は末尾の `\` がなくても通るので、片方だけ試して安心しない
-- この PC では、復帰が 3:00 ちょうどにならない（2〜8 分遅れる）ことがある。復帰タイマー自体は `\MyTasks\CopyRecordings` で正しく登録される（`powercfg /waketimers`）。11/05 は、復帰したのにタスクが起動しなかった（原因は未特定。タスクスケジューラの履歴を `wevtutil set-log Microsoft-Windows-TaskScheduler/Operational /enabled:true` で有効にしてある）
+- この PC では、復帰が 3:00 ちょうどにならない（4〜11 分遅れる）。復帰タイマー自体は `\MyTasks\CopyRecordings` で正しく登録される（`powercfg /waketimers`）。復帰後は、`StartWhenAvailable` による取りこぼしの起動（履歴の ID 114 → 129）が復帰の約 6 分後に走る
+- **取りこぼしの起動が働かない夜がある**: 2026-11-05 と 11-09 は、復帰（`ACPI Wake Alarm`）したのに `CopyRecordings` が起動せず、取りこぼしの通知（ID 114）も出なかった。起動した夜（11/06・07・08）と比べても、復帰の時刻・スリープの長さ・スリープの方法（どれも `Application API`）に違いはなかった。原因は未特定。対策として、復帰イベント（Power-Troubleshooter ID 1、`WakeSourceText = ACPI Wake Alarm`）の 2 分後に起動するトリガーを足す（README の「復帰イベントでも起動する」。足したあとの効果は未確認）
+- 取りこぼしを調べるときの手順: ①履歴（`TaskScheduler/Operational`）で ID 129（起動）・114（取りこぼしの起動）を日ごとに並べる ②System ログの Power-Troubleshooter ID 1 で復帰の時刻と `WakeSourceText` を見る ③`powercfg /waketimers`（管理者）で次のタイマーが登録されているか見る。ログ（`copy-YYYYMMDD.log`）がない日は、スクリプトが動いていない（スリープの失敗ではない）
 - ②は補助。コンソールセッションでは `WTSINFO.LastInputTime` が 0 で取れない（`no input`）ので、ブロックしない扱い。取れるのはリモートデスクトップなど
 - `SetSuspendState(false, false, false)`（第 1 引数 false = スリープ。休止ではない）。`rundll32 powrprof.dll,SetSuspendState` は引数の癖で休止になることがあるので使わない
 - 判定にはメディア再生などの検出を含まない
