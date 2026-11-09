@@ -522,6 +522,32 @@ Set-ScheduledTask -InputObject $task
 - 判定とスリープの結果は、同じログに `sleep:` 付きの行で残る（`Started as ...` → `Not sleeping: ...` / `Going to sleep`）。`Started as ...` の行すら出ないときは、タスクが起動していない（タスクの「前回の実行結果」を見る）。途中で失敗したときは `Failed at line N: ...` が出る
 - 動作確認: `.\scripts\Sleep-Computer.ps1 -WhatIf`（待たず、スリープもしない）
 
+#### 復帰イベントでも起動する（取りこぼし対策）
+
+毎日 3:00 のトリガー（`WakeToRun` + `StartWhenAvailable`）だけだと、PC は復帰したのにタスクが起動しない夜がある（2026-11-05 と 11-09 に発生。「復帰したが取りこぼしの実行が働かない」ように見える。原因は未特定）。復帰の 2 分後にも起動するトリガーを足しておく。タイマー（`ACPI Wake Alarm`）で起きたときだけ動くので、電源ボタンなどで起こしたときは動かない。取りこぼし起動と重なっても `MultipleInstances = IgnoreNew` で二重実行されず、同名・同サイズはスキップするので、2 回走っても害はない。
+
+```powershell
+# 管理者権限の PowerShell で（既存の毎日トリガーは残る）
+$query = @'
+<QueryList><Query Id="0" Path="System"><Select Path="System">*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]] and *[EventData[Data[@Name='WakeSourceText']='ACPI Wake Alarm']]</Select></Query></QueryList>
+'@
+$cls = Get-CimClass -ClassName MSFT_TaskEventTrigger -Namespace Root/Microsoft/Windows/TaskScheduler
+$trigger = New-CimInstance -CimClass $cls -ClientOnly
+$trigger.Enabled = $true
+$trigger.Subscription = $query
+$trigger.Delay = 'PT2M'
+
+$t = Get-ScheduledTask -TaskPath '\MyTasks\' -TaskName 'CopyRecordings'
+$t.Triggers = @($t.Triggers) + $trigger
+Set-ScheduledTask -InputObject $t
+
+# 確認: CalendarTrigger と EventTrigger の 2 つがあること
+([xml](Export-ScheduledTask -TaskPath '\MyTasks\' -TaskName 'CopyRecordings')).Task.Triggers.ChildNodes.Name
+```
+
+- 起動の記録は、タスクスケジューラの履歴で確認する（`wevtutil set-log Microsoft-Windows-TaskScheduler/Operational /enabled:true` で有効にする。既定は無効）。`Microsoft-Windows-TaskScheduler/Operational` の ID 129（起動）・114（取りこぼしの起動）を見る
+- 復帰元の文言（`WakeSourceText`）は、この PC では `ACPI Wake Alarm`。別の PC では違うことがある（`Get-WinEvent` で Power-Troubleshooter ID 1 の `WakeSourceText` を確かめて、`$query` の値を合わせる）
+
 ## 録画サーバー（roles/epgstation）
 
 [docker-mirakurun-epgstation](https://github.com/l3tnun/docker-mirakurun-epgstation) をもとに、[Mirakurun](https://github.com/Chinachu/Mirakurun)（チューナーの管理）+ MariaDB + [EPGStation](https://github.com/l3tnun/EPGStation)（予約・録画・エンコード・視聴）を Docker で動かす。`epgstation` グループのホスト（`hosts.yml`）だけに適用する。upstream の `setup.sh` は使わず、compose.yml と設定ファイルを role のテンプレートから生成する。

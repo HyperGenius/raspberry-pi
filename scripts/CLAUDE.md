@@ -12,6 +12,7 @@
 - SYSTEM のタスクで動くスクリプトは、失敗が画面に出ない。起動直後にログを 1 行書き、`trap` で失敗をログに残す（`Sleep-Computer.ps1` が最初の実機の実行で何も残さず、原因を後から追えなかった）
 - ドキュメントに Windows のパス（`C:\projects\MyProductsaspberry-pi\...`）を書くとき、スクリプトや here-document 経由で書くと `` `	` `
 ` が制御文字になって消える（README の `SleepAfterCopy` 登録例で `raspberry-pi` の `` が欠け、タスクが 2 回続けて起動に失敗した）。書いたあとに `grep` でパスを確認し、Edit ツールで直す
+- 「スリープしなかった」と言われたら、まず `copy-YYYYMMDD.log` の有無を見る。ログがない日は、スリープ以前に `CopyRecordings` が起動していない（タスクスケジューラの履歴 ID 129/114 と、System ログの復帰イベントで確かめる）。スリープ自体はイベント（Kernel-Power 187・42）と Power-Troubleshooter ID 1 の `SleepTime` で、実際に入ったか分かる
 - 電源・復帰まわりの文言は環境で違う。タイマー復帰は、この PC では `Device -ACPI Wake Alarm`（タスク名は出ない）。推測で書かず、システムログの実物（`Get-WinEvent`、Power-Troubleshooter ID 1）で確かめる
 
 ## 検証の落とし穴
