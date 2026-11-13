@@ -14,11 +14,12 @@
 
 ```
 タスクスケジューラ \MyTasks\CopyRecordings (SYSTEM, 3:00, WakeToRun)
-  └─ Copy-Recordings.ps1 -DeleteAfterCopy [-SleepAfter]
+  └─ Copy-Recordings.ps1 -DeleteAfterCopy [-EncodeAfter] [-SleepAfter]
        ├─ <データ>\logs\copy-YYYYMMDD.log        ──┐
        ├─ <データ>\metrics\copy_recordings.prom  ──┼─ Alloy (サービス) ─→ Grafana Cloud (Loki / Prometheus)
+       ├─ (-EncodeAfter) 子プロセスで Add-EncodeTasks.ps1 → AmatsukazeAddTask.exe（ログは encode-YYYYMMDD.log）
        └─ (-SleepAfter) Start-ScheduledTask \MyTasks\SleepAfterCopy
-              └─ Sleep-Computer.ps1: 復帰元の確認 → 120 秒待つ → スリープ
+              └─ Sleep-Computer.ps1 [-WaitForEncode]: 復帰元の確認 → (Amatsukaze のキューが空になるまで待つ) → 120 秒待つ → スリープ
 ```
 
 `<データ>` は `COPY_RECORDINGS_DATA_DIR`（既定 `%ProgramData%\CopyRecordings`）。ダッシュボード・アラートは `terraform/grafana-cloud`。
@@ -51,6 +52,9 @@
 - 実機で確認済み（2026-11-06 3:00）: タイマー復帰 → コピー → `sleep: Started as SYSTEM` → 120 秒待つ → `Going to sleep` → スリープ。それまでの 2 回（11/03・11/04）スリープしなかった原因は、README の登録コマンドのパスが壊れていて（`raspberry-pi` の `` が消えていた）、タスクがスクリプトを見つけられなかったこと。タスクの `LastTaskResult` が大きな値（`4294770688`）なら、起動前に失敗している
 - `Get-ScheduledTask` の `-TaskPath` は前後に `\` が必要（`'\MyTasks'`）。`Start-ScheduledTask` は末尾の `\` がなくても通るので、片方だけ試して安心しない
 - この PC では、復帰が 3:00 ちょうどにならない（2〜8 分遅れる）ことがある。復帰タイマー自体は `\MyTasks\CopyRecordings` で正しく登録される（`powercfg /waketimers`）。11/05 は、復帰したのにタスクが起動しなかった（原因は未特定。タスクスケジューラの履歴を `wevtutil set-log Microsoft-Windows-TaskScheduler/Operational /enabled:true` で有効にしてある）
+- `-WaitForEncode`: ①のあと、`<AMATSUKAZE_DIR>\data\Queue.xml` の `<State>Queue|Encoding</State>` の数と `AmatsukazeCLI` プロセスで「エンコード中」を判定し、60 秒おきに見て、空が 2 回続いたら先へ進む。待つあいだは `SetThreadExecutionState(ES_CONTINUOUS|ES_SYSTEM_REQUIRED)` で自動スリープを止める。`-MaxEncodeWaitHours`（12）で諦めたときは、スリープせずに終了する（エンコードを止めない）。`Queue.xml` が読めないときは「作業中」扱い。状態名（`Queue` `Encoding` `Complete` `Canceled`）は Amatsukaze のキューファイルから確認したもので、`Queue` と `Encoding` は実機の実行中の値を見ていない
+- `Copy-Recordings.ps1 -EncodeAfter` は `Complete-Run` の中で、メトリクスを書いたあと・スリープ用タスクを起動する前に、子プロセス（`Add-EncodeTasks.ps1` は最後に `exit` するため）で実行する。`ok` / `failed` / `delete_stopped` のときだけ。結果は終了コードにもメトリクスにも影響しない
+- Amatsukaze のサーバーはサービスではなく、ログインしたセッションの `AmatsukazeGUI.exe -l server`。サインアウト中や再起動後は動いていない（`AmatsukazeServerCLI.exe` を別途用意すれば可能性はあるが未検証）
 - ②は補助。コンソールセッションでは `WTSINFO.LastInputTime` が 0 で取れない（`no input`）ので、ブロックしない扱い。取れるのはリモートデスクトップなど
 - `SetSuspendState(false, false, false)`（第 1 引数 false = スリープ。休止ではない）。`rundll32 powrprof.dll,SetSuspendState` は引数の癖で休止になることがあるので使わない
 - 判定にはメディア再生などの検出を含まない

@@ -529,17 +529,26 @@ Set-ScheduledTask -InputObject $task
 1. `windows\amatsukaze\encode-profiles.csv.example` を `encode-profiles.csv` にコピーし、`キー,プロファイル名` を 1 行ずつ書く（UTF-8。Git 管理外）。上の行が優先。`#` で始まる行は無視
 2. `.env.ps1` に `ENCODE_OUTPUT_DIR`（エンコード済みの保存先）を書く（`.env.ps1.example` 参照。日本語を含むなら `.env.ps1` を **BOM 付き UTF-8** で保存する）
 3. 動作確認: `.\scripts\Add-EncodeTasks.ps1 -WhatIf`（登録せず、どのファイルがどのプロファイルになるかだけ表示。ログも書かない）
-4. タスクスケジューラへ登録（例。管理者権限の PowerShell で。時刻は録画のコピー後に合わせる）:
+4. コピーの直後に自動で登録し、エンコードが終わってからスリープさせる（下記）
 
 ```powershell
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-  -Argument '-NoProfile -ExecutionPolicy Bypass -File "C:\projects\MyProducts\raspberry-pi\scripts\Add-EncodeTasks.ps1"'
-$trigger = New-ScheduledTaskTrigger -Daily -At 5:00am
-$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 1)
-Register-ScheduledTask -TaskName 'MyTasks\AddEncodeTasks' -Action $action -Trigger $trigger `
-  -Principal $principal -Settings $settings
+# 管理者権限の PowerShell で。登録済みの CopyRecordings と SleepAfterCopy の引数・制限時間を変える
+$task = Get-ScheduledTask -TaskPath '\MyTasks\' -TaskName 'CopyRecordings'
+$task.Actions[0].Arguments += ' -EncodeAfter'            # コピーのあと、スリープ用タスクを起動する前に Add-EncodeTasks.ps1 を実行
+Set-ScheduledTask -InputObject $task
+
+$task = Get-ScheduledTask -TaskPath '\MyTasks\' -TaskName 'SleepAfterCopy'
+$task.Actions[0].Arguments += ' -WaitForEncode'          # Amatsukaze のキューが空になるまでスリープしない
+$task.Settings.ExecutionTimeLimit = 'PT14H'              # 既定の 1 時間では、エンコード待ちの途中で止められる
+Set-ScheduledTask -InputObject $task
 ```
+
+流れ: `CopyRecordings`（コピー）→ `Add-EncodeTasks.ps1`（キューへ登録）→ `SleepAfterCopy` を起動 → エンコードが終わるまで待つ → スリープ。
+
+- `-EncodeAfter` は、コピーの処理が終わったとき（`ok` / `failed` / `delete_stopped`）だけ実行する。録画中・設定や認証のエラーでは実行しない。結果はコピーのログに 1 行出るだけで、終了コードやメトリクスは変わらない。登録の詳細は `encode-YYYYMMDD.log`
+- `-WaitForEncode` は、`<AMATSUKAZE_DIR>\data\Queue.xml` に状態が `Queue` / `Encoding` の項目がなく、`AmatsukazeCLI.exe` も動いていない状態が 60 秒おきに 2 回続くまで待つ。待っているあいだは Windows に自動スリープしないよう要求する。`-MaxEncodeWaitHours`（既定 12）を過ぎたら、スリープせずに起きたままにする（エンコードを途中で止めない）。待ちの経過は `copy-YYYYMMDD.log` の `sleep:` の行に出る
+- **Amatsukaze のサーバーはログイン中のセッションで動いている**（`AmatsukazeGUI.exe -l server`。サービスではない）。サインアウトや再起動のあとは、起動し直さないと登録に失敗する。スリープからの復帰では、ログイン状態（ロック画面）が残るので問題ない
+- 単体で毎日実行したいときは、`Add-EncodeTasks.ps1` を実行するタスクを別に登録する（`-WakeToRun` は、起こしたい場合だけ付ける）
 
 - ログは `<データ>\logs\encode-YYYYMMDD.log`（30 日で削除）。終了コードは、設定の誤りか登録に失敗したファイルがあれば 1、キーに合わないファイルのスキップだけなら 0
 - Amatsukaze のサーバー（既定 `localhost:32768`）が起動していないと登録に失敗する。そのファイルは記録されず、次の実行でやり直す

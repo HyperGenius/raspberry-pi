@@ -12,6 +12,10 @@ itself slept, its task would still be "running" at the next trigger and the next
      matches -WakeSourcePattern (an RTC alarm, "Device -ACPI Wake Alarm", on the PC this was built on; the source
      does not name the task there) or names -WakeTaskName. A PC that was already awake (or that you woke yourself,
      by the power button, a keyboard or the network adapter) is left alone.
+  1b. With -WaitForEncode, first waits until Amatsukaze has nothing left to encode: no item in state Queue or Encoding in
+     <AMATSUKAZE_DIR>\data\Queue.xml (-AmatsukazeDir, default env AMATSUKAZE_DIR or C:\ProgramData\Amatsukaze) and no
+     AmatsukazeCLI.exe process, seen on two checks 60 s apart. While waiting it asks Windows not to sleep
+     (SetThreadExecutionState). After -MaxEncodeWaitHours it gives up and leaves the PC awake (the encode is not cut off).
   2. Waits -DelaySeconds so that Grafana Alloy can send the final log and metrics (its scrape interval is 60 s).
   3. Skips sleeping if a logon session has had keyboard/mouse input in the last -MinIdleMinutes
      (only reported by some sessions, e.g. remote desktop; the console session often reports none).
@@ -29,7 +33,10 @@ param(
     [int]$MinIdleMinutes = 10,
     [string]$WakeTaskName = 'MyTasks\CopyRecordings',
     [string]$WakeSourcePattern = 'Wake Alarm|Timer',
-    [int]$MaxWakeAgeHours = 8
+    [int]$MaxWakeAgeHours = 8,
+    [switch]$WaitForEncode,
+    [int]$MaxEncodeWaitHours = 12,
+    [string]$AmatsukazeDir
 )
 
 $ErrorActionPreference = 'Stop'
@@ -120,6 +127,12 @@ public static class SleepHelper
         return result;
     }
 
+    [DllImport("kernel32.dll")]
+    static extern uint SetThreadExecutionState(uint flags);
+
+    // Keeps Windows from sleeping on its own while this thread lives (ES_CONTINUOUS | ES_SYSTEM_REQUIRED); false releases it.
+    public static void KeepAwake(bool on) { SetThreadExecutionState(on ? 0x80000001u : 0x80000000u); }
+
     public static bool Suspend() { return SetSuspendState(false, false, false); }  // false = sleep, not hibernate
 }
 '@
@@ -136,6 +149,56 @@ if (-not $wake -or $wakeAge.TotalHours -gt $MaxWakeAgeHours -or -not ($wake.Mess
     $source = if ($wake) { $m = $wake.Message -replace '\s+', ' '; $m.Substring([Math]::Max(0, $m.Length - 100)) } else { 'no wake event' }
     Write-Log "Not sleeping: the PC was not woken by a timer (latest wake: $(if ($wake) { $wake.TimeCreated.ToString('s') } else { '-' }); $source)"
     exit 0
+}
+
+# Reasons Amatsukaze is still working (empty = idle). An unreadable queue file counts as busy.
+function Get-EncodeBusy([string]$queueFile) {
+    $reasons = @()
+    try {
+        $n = [regex]::Matches([IO.File]::ReadAllText($queueFile), '<State>(Queue|Encoding)</State>').Count
+        if ($n -gt 0) { $reasons += "$n item(s) queued or encoding" }
+    } catch {
+        $reasons += "could not read Queue.xml ($($_.Exception.Message))"
+    }
+    if (Get-Process -Name 'AmatsukazeCLI' -ErrorAction SilentlyContinue) { $reasons += 'AmatsukazeCLI.exe is running' }
+    return $reasons
+}
+
+if ($WaitForEncode) {
+    if (-not $AmatsukazeDir) { $AmatsukazeDir = if ($env:AMATSUKAZE_DIR) { $env:AMATSUKAZE_DIR } else { 'C:\ProgramData\Amatsukaze' } }
+    $queueFile = Join-Path $AmatsukazeDir 'data\Queue.xml'
+    if (-not (Test-Path -LiteralPath $queueFile -PathType Leaf)) {
+        Write-Log "Not sleeping: -WaitForEncode is set but the Amatsukaze queue was not found: $queueFile" WARN
+        exit 1
+    }
+    if (-not $PSCmdlet.ShouldProcess('Amatsukaze', "Wait up to ${MaxEncodeWaitHours}h for the encode queue to empty")) {
+        $b = Get-EncodeBusy $queueFile
+        Write-Log "Amatsukaze: $(if ($b) { 'busy (' + ($b -join '; ') + ')' } else { 'idle' })"
+    } else {
+        $deadline = (Get-Date).AddHours($MaxEncodeWaitHours)
+        $nextReport = Get-Date
+        $idleChecks = 0
+        [SleepHelper]::KeepAwake($true)
+        try {
+            while ($idleChecks -lt 2) {
+                $b = Get-EncodeBusy $queueFile
+                if (-not $b) { $idleChecks++ } else { $idleChecks = 0 }
+                if ($idleChecks -ge 2) { break }
+                if ((Get-Date) -ge $deadline) {
+                    Write-Log "Not sleeping: Amatsukaze was still busy after ${MaxEncodeWaitHours}h ($($b -join '; '))" WARN
+                    exit 0
+                }
+                if ((Get-Date) -ge $nextReport -and $b) {
+                    Write-Log "Waiting for Amatsukaze: $($b -join '; ')"
+                    $nextReport = (Get-Date).AddMinutes(10)
+                }
+                Start-Sleep -Seconds 60
+            }
+        } finally {
+            [SleepHelper]::KeepAwake($false)
+        }
+        Write-Log 'Amatsukaze is idle'
+    }
 }
 
 if ($PSCmdlet.ShouldProcess('this computer', "Wait ${DelaySeconds}s, then sleep unless in use")) {
