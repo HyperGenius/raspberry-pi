@@ -5,6 +5,7 @@
 | ファイル | 役割 |
 |---|---|
 | `Copy-Recordings.ps1` | SFTPGo（REST API）から録画を PC へコピー（`-DeleteAfterCopy` で移動）。ログとメトリクスを書く |
+| `Add-EncodeTasks.ps1` | 録画フォルダの `*.m2ts` を、ファイル名のキーで選んだプロファイルで Amatsukaze のキューに登録（対応表は `../windows/amatsukaze/encode-profiles.csv`）。ログは `<データ>\logs\encode-*.log`、登録済みは `submitted.txt` |
 | `Install-Alloy.ps1` | Grafana Alloy の導入と設定の配置（管理者権限） |
 | `Sleep-Computer.ps1` | タスクに起こされた PC をスリープに戻す（`\MyTasks\SleepAfterCopy` タスクから起動） |
 | `../windows/alloy/config.alloy.tmpl` | Alloy の設定のテンプレート |

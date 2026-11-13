@@ -522,6 +522,29 @@ Set-ScheduledTask -InputObject $task
 - 判定とスリープの結果は、同じログに `sleep:` 付きの行で残る（`Started as ...` → `Not sleeping: ...` / `Going to sleep`）。`Started as ...` の行すら出ないときは、タスクが起動していない（タスクの「前回の実行結果」を見る）。途中で失敗したときは `Failed at line N: ...` が出る
 - 動作確認: `.\scripts\Sleep-Computer.ps1 -WhatIf`（待たず、スリープもしない）
 
+#### 録画をエンコードキューに登録する（scripts/Add-EncodeTasks.ps1）
+
+録画フォルダ（既定 `E:\RaspberryPi_recorded`）の `*.m2ts` を、ファイル名に含まれるキーで選んだプロファイルで Amatsukaze（`AmatsukazeAddTask.exe`）に登録する。キーに合わないファイルはスキップ（ログに警告）。登録済みのファイルは `<データ>\submitted.txt`（既定 `%ProgramData%\EncodeRecordings`）に名前とサイズを記録し、再実行しても二重に登録しない（`--no-move` で元ファイルが残るため）。
+
+1. `windows\amatsukaze\encode-profiles.csv.example` を `encode-profiles.csv` にコピーし、`キー,プロファイル名` を 1 行ずつ書く（UTF-8。Git 管理外）。上の行が優先。`#` で始まる行は無視
+2. `.env.ps1` に `ENCODE_OUTPUT_DIR`（エンコード済みの保存先）を書く（`.env.ps1.example` 参照。日本語を含むなら `.env.ps1` を **BOM 付き UTF-8** で保存する）
+3. 動作確認: `.\scripts\Add-EncodeTasks.ps1 -WhatIf`（登録せず、どのファイルがどのプロファイルになるかだけ表示。ログも書かない）
+4. タスクスケジューラへ登録（例。管理者権限の PowerShell で。時刻は録画のコピー後に合わせる）:
+
+```powershell
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+  -Argument '-NoProfile -ExecutionPolicy Bypass -File "C:\projects\MyProducts\raspberry-pi\scripts\Add-EncodeTasks.ps1"'
+$trigger = New-ScheduledTaskTrigger -Daily -At 5:00am
+$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+Register-ScheduledTask -TaskName 'MyTasks\AddEncodeTasks' -Action $action -Trigger $trigger `
+  -Principal $principal -Settings $settings
+```
+
+- ログは `<データ>\logs\encode-YYYYMMDD.log`（30 日で削除）。終了コードは、設定の誤りか登録に失敗したファイルがあれば 1、キーに合わないファイルのスキップだけなら 0
+- Amatsukaze のサーバー（既定 `localhost:32768`）が起動していないと登録に失敗する。そのファイルは記録されず、次の実行でやり直す
+- プロファイル名は Amatsukaze 側の名前と完全に一致させる（大文字小文字も）
+
 ## 録画サーバー（roles/epgstation）
 
 [docker-mirakurun-epgstation](https://github.com/l3tnun/docker-mirakurun-epgstation) をもとに、[Mirakurun](https://github.com/Chinachu/Mirakurun)（チューナーの管理）+ MariaDB + [EPGStation](https://github.com/l3tnun/EPGStation)（予約・録画・エンコード・視聴）を Docker で動かす。`epgstation` グループのホスト（`hosts.yml`）だけに適用する。upstream の `setup.sh` は使わず、compose.yml と設定ファイルを role のテンプレートから生成する。
