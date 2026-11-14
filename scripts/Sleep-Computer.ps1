@@ -16,6 +16,8 @@ itself slept, its task would still be "running" at the next trigger and the next
      <AMATSUKAZE_DIR>\data\Queue.xml (-AmatsukazeDir, default env AMATSUKAZE_DIR or C:\ProgramData\Amatsukaze) and no
      AmatsukazeCLI.exe process, seen on two checks 60 s apart. While waiting it asks Windows not to sleep
      (SetThreadExecutionState). After -MaxEncodeWaitHours it gives up and leaves the PC awake (the encode is not cut off).
+  1c. Checks the wake source again just before suspending (after the waits). If the PC slept and resumed meanwhile (for example
+     Amatsukaze suspended it when its queue finished, and you woke it by hand), a wake that was not a timer cancels the sleep.
   2. Waits -DelaySeconds so that Grafana Alloy can send the final log and metrics (its scrape interval is 60 s).
   3. Skips sleeping if a logon session has had keyboard/mouse input in the last -MinIdleMinutes
      (only reported by some sessions, e.g. remote desktop; the console session often reports none).
@@ -137,17 +139,24 @@ public static class SleepHelper
 }
 '@
 
-# Was the PC woken by a timer? The source is "Device -ACPI Wake Alarm" here, or "Timer - Windows will execute 'NT TASK\<task>' ..." elsewhere.
-try {
+# Was the latest wake caused by a timer? The source is "Device -ACPI Wake Alarm" here, or "Timer - Windows will execute 'NT TASK\<task>' ..." elsewhere.
+# Returns $null if so, otherwise a description of the latest wake. Throws if the wake history cannot be read.
+function Get-NotTimerWake {
     $wake = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Power-Troubleshooter'; Id = 1 } -MaxEvents 1
+    $wakeAge = if ($wake) { (Get-Date) - $wake.TimeCreated } else { [TimeSpan]::MaxValue }
+    if ($wake -and $wakeAge.TotalHours -le $MaxWakeAgeHours -and ($wake.Message -match $WakeSourcePattern -or $wake.Message.Contains("NT TASK\$WakeTaskName"))) { return $null }
+    $source = if ($wake) { $m = $wake.Message -replace '\s+', ' '; $m.Substring([Math]::Max(0, $m.Length - 100)) } else { 'no wake event' }
+    return "latest wake: $(if ($wake) { $wake.TimeCreated.ToString('s') } else { '-' }); $source"
+}
+
+try {
+    $notTimer = Get-NotTimerWake
 } catch {
     Write-Log "Could not read the wake history, so the PC is left awake: $($_.Exception.Message)" WARN
     exit 1
 }
-$wakeAge = if ($wake) { (Get-Date) - $wake.TimeCreated } else { [TimeSpan]::MaxValue }
-if (-not $wake -or $wakeAge.TotalHours -gt $MaxWakeAgeHours -or -not ($wake.Message -match $WakeSourcePattern -or $wake.Message.Contains("NT TASK\$WakeTaskName"))) {
-    $source = if ($wake) { $m = $wake.Message -replace '\s+', ' '; $m.Substring([Math]::Max(0, $m.Length - 100)) } else { 'no wake event' }
-    Write-Log "Not sleeping: the PC was not woken by a timer (latest wake: $(if ($wake) { $wake.TimeCreated.ToString('s') } else { '-' }); $source)"
+if ($notTimer) {
+    Write-Log "Not sleeping: the PC was not woken by a timer ($notTimer)"
     exit 0
 }
 
@@ -204,6 +213,19 @@ if ($WaitForEncode) {
 if ($PSCmdlet.ShouldProcess('this computer', "Wait ${DelaySeconds}s, then sleep unless in use")) {
     Write-Log "Waiting ${DelaySeconds}s for Alloy to send the log and metrics"
     Start-Sleep -Seconds $DelaySeconds
+}
+
+# The PC may have slept and resumed while this task waited (this process is frozen during sleep; Amatsukaze can suspend the PC itself
+# when it finishes). Look at the latest wake again so that a PC you woke yourself is not put back to sleep.
+try {
+    $notTimer = Get-NotTimerWake
+} catch {
+    Write-Log "Could not read the wake history, so the PC is left awake: $($_.Exception.Message)" WARN
+    exit 1
+}
+if ($notTimer) {
+    Write-Log "Not sleeping: the PC was woken by something other than a timer while waiting ($notTimer)"
+    exit 0
 }
 
 [double]$idleSeconds = 0

@@ -547,6 +547,7 @@ Set-ScheduledTask -InputObject $task
 
 - `-EncodeAfter` は、コピーの処理が終わったとき（`ok` / `failed` / `delete_stopped`）だけ実行する。録画中・設定や認証のエラーでは実行しない。結果はコピーのログに 1 行出るだけで、終了コードやメトリクスは変わらない。登録の詳細は `encode-YYYYMMDD.log`
 - `-WaitForEncode` は、`<AMATSUKAZE_DIR>\data\Queue.xml` に状態が `Queue` / `Encoding` の項目がなく、`AmatsukazeCLI.exe` も動いていない状態が 60 秒おきに 2 回続くまで待つ。待っているあいだは Windows に自動スリープしないよう要求する。`-MaxEncodeWaitHours`（既定 12）を過ぎたら、スリープせずに起きたままにする（エンコードを途中で止めない）。待ちの経過は `copy-YYYYMMDD.log` の `sleep:` の行に出る
+- **Amatsukaze 自身の「終了後の動作」（スリープ）は「何もしない」にする。** 有効だと、キューが空になった 45 秒後に Amatsukaze がスリープさせ、待機中の `SleepAfterCopy` が凍る（2026-11-14 に発生）。凍ったタスクは次の復帰（手動でも）で再開する。そのため、スリープの直前にもう一度、直近の復帰が **タイマーによるものか** を確かめ、手で起こした PC（電源ボタンなど）ならスリープしない（`sleep: Not sleeping: the PC was woken by something other than a timer while waiting` がログに出る）。スリープは `Sleep-Computer.ps1` に任せる
 - **Amatsukaze のサーバーはログイン中のセッションで動いている**（`AmatsukazeGUI.exe -l server`。サービスではない）。サインアウトや再起動のあとは、起動し直さないと登録に失敗する。スリープからの復帰では、ログイン状態（ロック画面）が残るので問題ない
 - 単体で毎日実行したいときは、`Add-EncodeTasks.ps1` を実行するタスクを別に登録する（`-WakeToRun` は、起こしたい場合だけ付ける）
 
