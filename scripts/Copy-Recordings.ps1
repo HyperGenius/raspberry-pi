@@ -34,6 +34,12 @@ When the run ends, start the scheduled task \MyTasks\SleepAfterCopy (Sleep-Compu
 if the scheduled task woke it. Not done after a run skipped because of a recording (the task's retry still has to run),
 or with -WhatIf. Register that task first (see README).
 
+.PARAMETER EncodeAfter
+When the copy phase has finished (the run ended ok, failed or delete_stopped; not after a recording, a configuration, EPGStation
+or authentication problem, and not with -WhatIf), run Add-EncodeTasks.ps1 in a separate process to queue the recordings in
+Amatsukaze. This happens before -SleepAfter starts the sleep task. Its result is only logged; it never changes the exit code
+or the metrics. Add-EncodeTasks.ps1 writes its own log (encode-YYYYMMDD.log).
+
 .PARAMETER DeleteAfterCopy
 Delete each remote file once its local copy is complete (just copied, or already present with the same size).
 EPGStation is checked again before every delete; if a recording has started or the API cannot be reached,
@@ -47,7 +53,8 @@ any failed file, or deletes stopped by a recording.
 param(
     [switch]$SkipRecordingCheck,
     [switch]$DeleteAfterCopy,
-    [switch]$SleepAfter
+    [switch]$SleepAfter,
+    [switch]$EncodeAfter
 )
 
 $ErrorActionPreference = 'Stop'
@@ -150,6 +157,21 @@ function Write-Metrics([string]$reason, [int]$code) {
 function Complete-Run([string]$reason, [int]$code) {
     if ($script:logFile) {
         try { Write-Metrics $reason $code } catch { Write-Warning "Could not write $metricsFile : $($_.Exception.Message)" }
+    }
+    # Queue the copied recordings in Amatsukaze. A child process: Add-EncodeTasks.ps1 ends with exit, which would end this one.
+    if ($EncodeAfter -and -not $WhatIfPreference -and @('ok', 'failed', 'delete_stopped') -contains $reason) {
+        try {
+            $psExe = (Get-Process -Id $PID).Path
+            $p = Start-Process -FilePath $psExe -Wait -PassThru -WindowStyle Hidden -ArgumentList @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f (Join-Path $PSScriptRoot 'Add-EncodeTasks.ps1')))
+            if ($p.ExitCode -eq 0) {
+                Write-Log 'Add-EncodeTasks.ps1 finished'  # its own log is encode-YYYYMMDD.log
+            } else {
+                Write-Log "Add-EncodeTasks.ps1 exited with $($p.ExitCode) (see encode-YYYYMMDD.log)" WARN
+            }
+        } catch {
+            Write-Log "Could not run Add-EncodeTasks.ps1: $($_.Exception.Message)" WARN
+        }
     }
     # A separate task does the sleeping: this process would be frozen by the sleep, and its task would still be running at the next trigger.
     if ($SleepAfter -and -not $WhatIfPreference -and $reason -ne 'recording') {

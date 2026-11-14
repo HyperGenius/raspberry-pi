@@ -1,0 +1,8 @@
+# Copy to encode-profiles.csv (git-ignored) and edit. UTF-8. One "key,profile" per line.
+# A recording whose file name contains the key (case-insensitive) is encoded with the profile.
+# The first matching line wins: put specific keys above general ones.
+# Recordings that match no line are skipped. Keys and profile names must not contain a comma.
+# The profile must exist in Amatsukaze (case-sensitive).
+#
+# key,profile
+EXAMPLE_KEY,EXAMPLE_PROFILE

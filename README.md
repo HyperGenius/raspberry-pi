@@ -522,6 +522,39 @@ Set-ScheduledTask -InputObject $task
 - 判定とスリープの結果は、同じログに `sleep:` 付きの行で残る（`Started as ...` → `Not sleeping: ...` / `Going to sleep`）。`Started as ...` の行すら出ないときは、タスクが起動していない（タスクの「前回の実行結果」を見る）。途中で失敗したときは `Failed at line N: ...` が出る
 - 動作確認: `.\scripts\Sleep-Computer.ps1 -WhatIf`（待たず、スリープもしない）
 
+#### 録画をエンコードキューに登録する（scripts/Add-EncodeTasks.ps1）
+
+録画フォルダ（既定 `E:\RaspberryPi_recorded`）の `*.m2ts` を、ファイル名に含まれるキーで選んだプロファイルで Amatsukaze（`AmatsukazeAddTask.exe`）に登録する。キーに合わないファイルはスキップ（ログに警告）。登録済みのファイルは `<データ>\submitted.txt`（既定 `%ProgramData%\EncodeRecordings`）に名前とサイズを記録し、再実行しても二重に登録しない（`--no-move` で元ファイルが残るため）。
+
+1. `windows\amatsukaze\encode-profiles.csv.example` を `encode-profiles.csv` にコピーし、`キー,プロファイル名` を 1 行ずつ書く（UTF-8。Git 管理外）。上の行が優先。`#` で始まる行は無視
+2. `.env.ps1` に `ENCODE_OUTPUT_DIR`（エンコード済みの保存先）を書く（`.env.ps1.example` 参照。日本語を含むなら `.env.ps1` を **BOM 付き UTF-8** で保存する）
+3. 動作確認: `.\scripts\Add-EncodeTasks.ps1 -WhatIf`（登録せず、どのファイルがどのプロファイルになるかだけ表示。ログも書かない）
+4. コピーの直後に自動で登録し、エンコードが終わってからスリープさせる（下記）
+
+```powershell
+# 管理者権限の PowerShell で。登録済みの CopyRecordings と SleepAfterCopy の引数・制限時間を変える
+$task = Get-ScheduledTask -TaskPath '\MyTasks\' -TaskName 'CopyRecordings'
+$task.Actions[0].Arguments += ' -EncodeAfter'            # コピーのあと、スリープ用タスクを起動する前に Add-EncodeTasks.ps1 を実行
+Set-ScheduledTask -InputObject $task
+
+$task = Get-ScheduledTask -TaskPath '\MyTasks\' -TaskName 'SleepAfterCopy'
+$task.Actions[0].Arguments += ' -WaitForEncode'          # Amatsukaze のキューが空になるまでスリープしない
+$task.Settings.ExecutionTimeLimit = 'PT14H'              # 既定の 1 時間では、エンコード待ちの途中で止められる
+Set-ScheduledTask -InputObject $task
+```
+
+流れ: `CopyRecordings`（コピー）→ `Add-EncodeTasks.ps1`（キューへ登録）→ `SleepAfterCopy` を起動 → エンコードが終わるまで待つ → スリープ。
+
+- `-EncodeAfter` は、コピーの処理が終わったとき（`ok` / `failed` / `delete_stopped`）だけ実行する。録画中・設定や認証のエラーでは実行しない。結果はコピーのログに 1 行出るだけで、終了コードやメトリクスは変わらない。登録の詳細は `encode-YYYYMMDD.log`
+- `-WaitForEncode` は、`<AMATSUKAZE_DIR>\data\Queue.xml` に状態が `Queue` / `Encoding` の項目がなく、`AmatsukazeCLI.exe` も動いていない状態が 60 秒おきに 2 回続くまで待つ。待っているあいだは Windows に自動スリープしないよう要求する。`-MaxEncodeWaitHours`（既定 12）を過ぎたら、スリープせずに起きたままにする（エンコードを途中で止めない）。待ちの経過は `copy-YYYYMMDD.log` の `sleep:` の行に出る
+- **Amatsukaze 自身の「終了後の動作」（スリープ）は「何もしない」にする。** 有効だと、キューが空になった 45 秒後に Amatsukaze がスリープさせ、待機中の `SleepAfterCopy` が凍る（2026-11-14 に発生）。凍ったタスクは次の復帰（手動でも）で再開する。そのため、スリープの直前にもう一度、直近の復帰が **タイマーによるものか** を確かめ、手で起こした PC（電源ボタンなど）ならスリープしない（`sleep: Not sleeping: the PC was woken by something other than a timer while waiting` がログに出る）。スリープは `Sleep-Computer.ps1` に任せる
+- **Amatsukaze のサーバーはログイン中のセッションで動いている**（`AmatsukazeGUI.exe -l server`。サービスではない）。サインアウトや再起動のあとは、起動し直さないと登録に失敗する。スリープからの復帰では、ログイン状態（ロック画面）が残るので問題ない
+- 単体で毎日実行したいときは、`Add-EncodeTasks.ps1` を実行するタスクを別に登録する（`-WakeToRun` は、起こしたい場合だけ付ける）
+
+- ログは `<データ>\logs\encode-YYYYMMDD.log`（30 日で削除）。終了コードは、設定の誤りか登録に失敗したファイルがあれば 1、キーに合わないファイルのスキップだけなら 0
+- Amatsukaze のサーバー（既定 `localhost:32768`）が起動していないと登録に失敗する。そのファイルは記録されず、次の実行でやり直す
+- プロファイル名は Amatsukaze 側の名前と完全に一致させる（大文字小文字も）
+
 ## 録画サーバー（roles/epgstation）
 
 [docker-mirakurun-epgstation](https://github.com/l3tnun/docker-mirakurun-epgstation) をもとに、[Mirakurun](https://github.com/Chinachu/Mirakurun)（チューナーの管理）+ MariaDB + [EPGStation](https://github.com/l3tnun/EPGStation)（予約・録画・エンコード・視聴）を Docker で動かす。`epgstation` グループのホスト（`hosts.yml`）だけに適用する。upstream の `setup.sh` は使わず、compose.yml と設定ファイルを role のテンプレートから生成する。

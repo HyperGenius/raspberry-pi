@@ -19,3 +19,6 @@ __pycache__/
 
 # 録画のコピー用スクリプトの認証情報・フォルダ名（.env.ps1.example をコピーして作る）
 .env.ps1
+
+# Amatsukaze のエンコード登録用の、キーとプロファイルの対応表（encode-profiles.csv.example をコピーして作る）
+windows/amatsukaze/encode-profiles.csv
