@@ -14,6 +14,9 @@
 ` が制御文字になって消える（README の `SleepAfterCopy` 登録例で `raspberry-pi` の `` が欠け、タスクが 2 回続けて起動に失敗した）。書いたあとに `grep` でパスを確認し、Edit ツールで直す
 - 「スリープしなかった」と言われたら、まず `copy-YYYYMMDD.log` の有無を見る。ログがない日は、スリープ以前に `CopyRecordings` が起動していない（タスクスケジューラの履歴 ID 129/114 と、System ログの復帰イベントで確かめる）。スリープ自体はイベント（Kernel-Power 187・42）と Power-Troubleshooter ID 1 の `SleepTime` で、実際に入ったか分かる
 - 電源・復帰まわりの文言は環境で違う。タイマー復帰は、この PC では `Device -ACPI Wake Alarm`（タスク名は出ない）。推測で書かず、システムログの実物（`Get-WinEvent`、Power-Troubleshooter ID 1）で確かめる
+- タスクスケジューラの登録は `Register-Tasks.ps1` と `windows/tasks/tasks.psd1` だけで行う。README に `Arguments += ...` や `Triggers + ...` のような「既存のタスクに足す」コマンドを書かない（2 回実行すると重複する）。タスクの項目を増やしたら、`Get-TaskSignature`（比較）にも足す
+- `foreach ($x in @($v))` は、`$v` が `$null` のとき 5.1 でも 7 でも要素 1 つ（`$null`）になる。省略できる設定は `foreach ($x in $v)`（0 回）で回す
+- 変数名の大文字小文字は区別されない。`param([string]$Config)` のあとに `$config = ...` と書くと、ハッシュテーブルが文字列にされる（テストで踏んだ）
 
 ## 検証の落とし穴
 - **`.env.ps1` は環境変数を上書きする**（スクリプトが読み込む）。テストで環境変数を渡しても、リポジトリ直下に `.env.ps1` があると本物の SFTPGo・EPGStation に接続する。テストはスクリプトをスクラッチに複製して（`<tmp>/scripts/` に置けば `..\.env.ps1` が見つからない）、モックの HTTP サーバー（SFTPGo の `/api/v2/user/token` `dirs` `files`、EPGStation の `/api/recording`）に向ける。**`-DeleteAfterCopy` を本物に向けて試さない**
