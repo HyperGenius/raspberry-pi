@@ -511,27 +511,20 @@ Alloy の導入（初回だけ。管理者権限の PowerShell で）:
 
 毎日 3:00 のトリガー（`WakeToRun` + `StartWhenAvailable`）だけだと、PC は復帰したのにタスクが起動しない夜がある（2026-11-05 と 11-09 に発生。「復帰したが取りこぼしの実行が働かない」ように見える。原因は未特定）。復帰の 2 分後にも起動するトリガーを足しておく。タイマー（`ACPI Wake Alarm`）で起きたときだけ動くので、電源ボタンなどで起こしたときは動かない。取りこぼし起動と重なっても `MultipleInstances = IgnoreNew` で二重実行されず、同名・同サイズはスキップするので、2 回走っても害はない。
 
+設定ファイル（`tasks.psd1`）の `CopyRecordings` の `Triggers` に、次の 1 行を足して `.\scripts\Register-Tasks.ps1` を再実行する（`tasks.psd1.example` はこの形。毎日のトリガーはそのまま残る。再実行しても、トリガーは増えない）。外すときは、この行を消して再実行する。
+
 ```powershell
-# 管理者権限の PowerShell で（既存の毎日トリガーは残る）
-$query = @'
-<QueryList><Query Id="0" Path="System"><Select Path="System">*[System[Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1]] and *[EventData[Data[@Name='WakeSourceText']='ACPI Wake Alarm']]</Select></Query></QueryList>
-'@
-$cls = Get-CimClass -ClassName MSFT_TaskEventTrigger -Namespace Root/Microsoft/Windows/TaskScheduler
-$trigger = New-CimInstance -CimClass $cls -ClientOnly
-$trigger.Enabled = $true
-$trigger.Subscription = $query
-$trigger.Delay = 'PT2M'
+@{ Type = 'WakeEvent'; WakeSource = 'ACPI Wake Alarm'; Delay = 'PT2M' }
+```
 
-$t = Get-ScheduledTask -TaskPath '\MyTasks\' -TaskName 'CopyRecordings'
-$t.Triggers = @($t.Triggers) + $trigger
-Set-ScheduledTask -InputObject $t
+確認（管理者権限の PowerShell で）: `[update]` の差分に `trigger=Event` が出ること。登録後は、次で `CalendarTrigger` と `EventTrigger` の 2 つがあること。
 
-# 確認: CalendarTrigger と EventTrigger の 2 つがあること
+```powershell
 ([xml](Export-ScheduledTask -TaskPath '\MyTasks\' -TaskName 'CopyRecordings')).Task.Triggers.ChildNodes.Name
 ```
 
 - 起動の記録は、タスクスケジューラの履歴で確認する（`wevtutil set-log Microsoft-Windows-TaskScheduler/Operational /enabled:true` で有効にする。既定は無効）。`Microsoft-Windows-TaskScheduler/Operational` の ID 129（起動）・114（取りこぼしの起動）を見る
-- 復帰元の文言（`WakeSourceText`）は、この PC では `ACPI Wake Alarm`。別の PC では違うことがある（`Get-WinEvent` で Power-Troubleshooter ID 1 の `WakeSourceText` を確かめて、`$query` の値を合わせる）
+- 復帰元の文言（`WakeSourceText`）は、この PC では `ACPI Wake Alarm`。別の PC では違うことがある（`Get-WinEvent` で Power-Troubleshooter ID 1 の `WakeSourceText` を確かめて、設定ファイルの `WakeSource` を合わせる）
 
 #### 録画をエンコードキューに登録する（scripts/Add-EncodeTasks.ps1）
 
