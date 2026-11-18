@@ -5,6 +5,7 @@
 | ファイル | 役割 |
 |---|---|
 | `Copy-Recordings.ps1` | SFTPGo（REST API）から録画を PC へコピー（`-DeleteAfterCopy` で移動）。ログとメトリクスを書く |
+| `Add-EncodeTasks.ps1` | 録画フォルダの `*.m2ts` を、ファイル名のキーで選んだプロファイルで Amatsukaze のキューに登録（対応表は `../windows/amatsukaze/encode-profiles.csv`）。ログは `<データ>\logs\encode-*.log`、登録済みは `submitted.txt` |
 | `Install-Alloy.ps1` | Grafana Alloy の導入と設定の配置（管理者権限） |
 | `Sleep-Computer.ps1` | タスクに起こされた PC をスリープに戻す（`\MyTasks\SleepAfterCopy` タスクから起動） |
 | `../windows/alloy/config.alloy.tmpl` | Alloy の設定のテンプレート |
@@ -13,11 +14,12 @@
 
 ```
 タスクスケジューラ \MyTasks\CopyRecordings (SYSTEM, 3:00, WakeToRun)
-  └─ Copy-Recordings.ps1 -DeleteAfterCopy [-SleepAfter]
+  └─ Copy-Recordings.ps1 -DeleteAfterCopy [-EncodeAfter] [-SleepAfter]
        ├─ <データ>\logs\copy-YYYYMMDD.log        ──┐
        ├─ <データ>\metrics\copy_recordings.prom  ──┼─ Alloy (サービス) ─→ Grafana Cloud (Loki / Prometheus)
+       ├─ (-EncodeAfter) 子プロセスで Add-EncodeTasks.ps1 → AmatsukazeAddTask.exe（ログは encode-YYYYMMDD.log）
        └─ (-SleepAfter) Start-ScheduledTask \MyTasks\SleepAfterCopy
-              └─ Sleep-Computer.ps1: 復帰元の確認 → 120 秒待つ → スリープ
+              └─ Sleep-Computer.ps1 [-WaitForEncode]: 復帰元の確認 → (Amatsukaze のキューが空になるまで待つ) → 120 秒待つ → スリープ
 ```
 
 `<データ>` は `COPY_RECORDINGS_DATA_DIR`（既定 `%ProgramData%\CopyRecordings`）。ダッシュボード・アラートは `terraform/grafana-cloud`。
@@ -52,6 +54,10 @@
 - この PC では、復帰が 3:00 ちょうどにならない（4〜11 分遅れる）。復帰タイマー自体は `\MyTasks\CopyRecordings` で正しく登録される（`powercfg /waketimers`）。復帰後は、`StartWhenAvailable` による取りこぼしの起動（履歴の ID 114 → 129）が復帰の約 6 分後に走る
 - **取りこぼしの起動が働かない夜がある**: 2026-11-05 と 11-09 は、復帰（`ACPI Wake Alarm`）したのに `CopyRecordings` が起動せず、取りこぼしの通知（ID 114）も出なかった。起動した夜（11/06・07・08）と比べても、復帰の時刻・スリープの長さ・スリープの方法（どれも `Application API`）に違いはなかった。原因は未特定。対策として、復帰イベント（Power-Troubleshooter ID 1、`WakeSourceText = ACPI Wake Alarm`）の 2 分後に起動するトリガーを足す（README の「復帰イベントでも起動する」。足したあとの効果は未確認）
 - 取りこぼしを調べるときの手順: ①履歴（`TaskScheduler/Operational`）で ID 129（起動）・114（取りこぼしの起動）を日ごとに並べる ②System ログの Power-Troubleshooter ID 1 で復帰の時刻と `WakeSourceText` を見る ③`powercfg /waketimers`（管理者）で次のタイマーが登録されているか見る。ログ（`copy-YYYYMMDD.log`）がない日は、スクリプトが動いていない（スリープの失敗ではない）
+- `-WaitForEncode`: ①のあと、`<AMATSUKAZE_DIR>\data\Queue.xml` の `<State>Queue|Encoding</State>` の数と `AmatsukazeCLI` プロセスで「エンコード中」を判定し、60 秒おきに見て、空が 2 回続いたら先へ進む。待つあいだは `SetThreadExecutionState(ES_CONTINUOUS|ES_SYSTEM_REQUIRED)` で自動スリープを止める。`-MaxEncodeWaitHours`（12）で諦めたときは、スリープせずに終了する（エンコードを止めない）。`Queue.xml` が読めないときは「作業中」扱い。状態名（`Queue` `Encoding` `Complete` `Canceled`）は Amatsukaze のキューファイルから確認したもので、`Queue` と `Encoding` は実機の実行中の値を見ていない
+- `Copy-Recordings.ps1 -EncodeAfter` は `Complete-Run` の中で、メトリクスを書いたあと・スリープ用タスクを起動する前に、子プロセス（`Add-EncodeTasks.ps1` は最後に `exit` するため）で実行する。`ok` / `failed` / `delete_stopped` のときだけ。結果は終了コードにもメトリクスにも影響しない
+- スリープの直前（`-DelaySeconds` の後）に、復帰元をもう一度判定する（`Get-NotTimerWake`）。理由: 待機中に PC がスリープすると、このプロセスは凍り、次の復帰で再開して、起動時の判定のままスリープしてしまう。実際に 2026-11-14 に、Amatsukaze の「終了後の動作 = スリープ」（`AmatsukazeServer.xml` の `finishSetting`、`Action=Suspend` `Seconds=45`。`Kernel-Power` 187 の理由が `Application API`）が 03:27 にスリープさせ、13:37 に手動で起こすと、凍っていたタスクが 13:40 にスリープさせた。直近の復帰がタイマーでなければ（手動の復帰）スリープしない。Amatsukaze 側の終了後スリープは「何もしない」にする（README）
+- Amatsukaze のサーバーはサービスではなく、ログインしたセッションの `AmatsukazeGUI.exe -l server`。サインアウト中や再起動後は動いていない（`AmatsukazeServerCLI.exe` を別途用意すれば可能性はあるが未検証）
 - ②は補助。コンソールセッションでは `WTSINFO.LastInputTime` が 0 で取れない（`no input`）ので、ブロックしない扱い。取れるのはリモートデスクトップなど
 - `SetSuspendState(false, false, false)`（第 1 引数 false = スリープ。休止ではない）。`rundll32 powrprof.dll,SetSuspendState` は引数の癖で休止になることがあるので使わない
 - 判定にはメディア再生などの検出を含まない
