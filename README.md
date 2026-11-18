@@ -480,20 +480,17 @@ Alloy の導入（初回だけ。管理者権限の PowerShell で）:
 - 何度実行してもよい（トークンや URL を変えたときも再実行する）
 - 送信されたか確認するには、Grafana Cloud の Explore で `{job="copy-recordings"}`（Loki・Prometheus）を指定する。`copy_recordings_*` は、`Copy-Recordings.ps1` を 1 回実行してから約 1 分後に見える
 
-タスクスケジューラへの登録（例。管理者権限の PowerShell で。SYSTEM で実行するので、データフォルダの既定は `C:\ProgramData\CopyRecordings`）:
+#### タスクスケジューラへの登録（scripts/Register-Tasks.ps1）
 
-```powershell
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-  -Argument '-NoProfile -ExecutionPolicy Bypass -File "C:\projects\MyProducts\raspberry-pi\scripts\Copy-Recordings.ps1" -DeleteAfterCopy'
-$trigger = New-ScheduledTaskTrigger -Daily -At 3:00am
-$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-$settings = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable `
-  -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 10) `
-  -ExecutionTimeLimit (New-TimeSpan -Hours 6)
-Register-ScheduledTask -TaskName 'MyTasks\CopyRecordings' -Action $action -Trigger $trigger `
-  -Principal $principal -Settings $settings
-```
+`\MyTasks\CopyRecordings`（毎日 3:00 に起こしてコピー）と `\MyTasks\SleepAfterCopy`（スリープ専用）を、設定ファイルの内容どおりに登録する。SYSTEM で実行するので、データフォルダの既定は `C:\ProgramData\CopyRecordings`。
 
+1. `windows\tasks\tasks.psd1.example` を `tasks.psd1` にコピーして編集する（Git 管理外。引数・時刻・復帰イベントのトリガー・制限時間などを、コメントを見ながら変える。スクリプトのパスは書かなくてよい）
+2. 管理者権限の PowerShell で、まず `.\scripts\Register-Tasks.ps1 -WhatIf`（何も変えず、登録されるタスクと現在との差分だけ表示する）
+3. 問題なければ `.\scripts\Register-Tasks.ps1`
+
+- **何度実行しても同じ結果になる。** 設定ファイルから完成形のタスクを組み立てて、登録済みのタスクと比べる。同じなら何もせず（`[unchanged]`）、違えば差分を表示して置き換える（`[update]`）、なければ作る（`[create]`）。設定ファイルが唯一の定義なので、変えたいときは設定ファイルを直して再実行する（スイッチを消せば、タスクからも消える）
+- 設定ファイルにないタスクは触らない（削除もしない）。登録済みのタスクを置き換えるので、タスクスケジューラの画面で手で変えた設定は戻る（無効にしたタスクも有効に戻る）。実行中のタスクは止めない
+- 2 回続けて実行して `[unchanged]` になれば、登録は設定ファイルと一致している。`-TaskPath '\MyTasksTest\'` を付けると、別のフォルダに試しに登録できる
 - 運用: スクリプトが `.env.ps1`（リポジトリ直下）を読むので、SYSTEM で実行するならそのファイルを SYSTEM が読めるようにしておく（ユーザーのフォルダ配下に置かない）
 - ログとメトリクスの出力先は、スクリプトと Alloy の設定（`DATA_DIR`）で同じにする。`COPY_RECORDINGS_DATA_DIR` を変えたら `Install-Alloy.ps1` も再実行する
 
@@ -501,19 +498,7 @@ Register-ScheduledTask -TaskName 'MyTasks\CopyRecordings' -Action $action -Trigg
 
 `WakeToRun` で 3:00 に起こした PC を、終わったらスリープに戻す。`Copy-Recordings.ps1` 自身がスリープすると、スリープ中はプロセスが止まったままになり、次の 3:00 に前回のタスクがまだ実行中とみなされて起動しない。そのため、スリープ専用のタスク `\MyTasks\SleepAfterCopy` を別に登録し、`-SleepAfter` を付けると実行の最後にそのタスクを起動する。
 
-```powershell
-# 管理者権限の PowerShell で（トリガーなし。Copy-Recordings.ps1 -SleepAfter が起動する）
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-  -Argument '-NoProfile -ExecutionPolicy Bypass -File "C:\projects\MyProducts\raspberry-pi\scripts\Sleep-Computer.ps1"'
-$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 1)
-Register-ScheduledTask -TaskName 'MyTasks\SleepAfterCopy' -Action $action -Principal $principal -Settings $settings
-
-# Copy-Recordings の登録の -Argument の末尾に -SleepAfter を足す（登録済みなら変更する）
-$task = Get-ScheduledTask -TaskPath '\MyTasks\' -TaskName 'CopyRecordings'
-$task.Actions[0].Arguments += ' -SleepAfter'
-Set-ScheduledTask -InputObject $task
-```
+設定ファイル（`tasks.psd1`）で、`SleepAfterCopy` を（トリガーなしで）登録し、`CopyRecordings` の `Arguments` に `'-SleepAfter'` を入れる。変えたら `.\scripts\Register-Tasks.ps1` を再実行する。
 
 - スリープするのは、**直近の復帰がタイマー（RTC のアラーム）によるもの**のとき（システムログの Power-Troubleshooter ID 1 の「スリープ状態の解除元」が `Wake Alarm` または `Timer`、または `MyTasks\CopyRecordings` タスクの名前を含む。8 時間以内）だけ。すでに起きていた PC や、自分で起こした PC（電源ボタン・キーボード・Wi-Fi など）はそのままにする。タスク以外のタイマーで起きた場合も同じ扱いになる
 - 起こしたタスクの後でも、Alloy が最後のログとメトリクスを送れるよう、既定で 120 秒待ってからスリープする（`-DelaySeconds`）
@@ -531,17 +516,11 @@ Set-ScheduledTask -InputObject $task
 3. 動作確認: `.\scripts\Add-EncodeTasks.ps1 -WhatIf`（登録せず、どのファイルがどのプロファイルになるかだけ表示。ログも書かない）
 4. コピーの直後に自動で登録し、エンコードが終わってからスリープさせる（下記）
 
-```powershell
-# 管理者権限の PowerShell で。登録済みの CopyRecordings と SleepAfterCopy の引数・制限時間を変える
-$task = Get-ScheduledTask -TaskPath '\MyTasks\' -TaskName 'CopyRecordings'
-$task.Actions[0].Arguments += ' -EncodeAfter'            # コピーのあと、スリープ用タスクを起動する前に Add-EncodeTasks.ps1 を実行
-Set-ScheduledTask -InputObject $task
+設定ファイル（`tasks.psd1`）を次のようにして、`.\scripts\Register-Tasks.ps1` を再実行する（`tasks.psd1.example` はこの形）。
 
-$task = Get-ScheduledTask -TaskPath '\MyTasks\' -TaskName 'SleepAfterCopy'
-$task.Actions[0].Arguments += ' -WaitForEncode'          # Amatsukaze のキューが空になるまでスリープしない
-$task.Settings.ExecutionTimeLimit = 'PT14H'              # 既定の 1 時間では、エンコード待ちの途中で止められる
-Set-ScheduledTask -InputObject $task
-```
+- `CopyRecordings` の `Arguments` に `'-EncodeAfter'`: コピーのあと、スリープ用タスクを起動する前に `Add-EncodeTasks.ps1` を実行する
+- `SleepAfterCopy` の `Arguments` に `'-WaitForEncode'`: Amatsukaze のキューが空になるまでスリープしない
+- `SleepAfterCopy` の `ExecutionTimeLimitHours` を 14 にする: 1 時間のままだと、エンコード待ちの途中でタスクが止められる（`-MaxEncodeWaitHours` の既定 12 より長くする）
 
 流れ: `CopyRecordings`（コピー）→ `Add-EncodeTasks.ps1`（キューへ登録）→ `SleepAfterCopy` を起動 → エンコードが終わるまで待つ → スリープ。
 

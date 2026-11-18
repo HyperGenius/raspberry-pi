@@ -1,0 +1,54 @@
+# Scheduled tasks for scripts\Register-Tasks.ps1. Copy this file to tasks.psd1 (not in Git) and edit the copy.
+#
+#   .\scripts\Register-Tasks.ps1 -WhatIf     shows what would change
+#   .\scripts\Register-Tasks.ps1             applies it (elevated PowerShell)
+#
+# This file is the whole definition: a task is rebuilt from it every time, so to change a task, change it here and run the
+# script again. Remove an item here and it is removed from the task. Tasks that are not listed here are never touched.
+# Only ASCII in this file. Strings are single-quoted; $true / $false are the only values that are not.
+@{
+    TaskPath = '\MyTasks\'
+
+    Tasks = @(
+        @{
+            Name   = 'CopyRecordings'
+            Script = 'Copy-Recordings.ps1'      # a file in scripts\ ; the full path is filled in by Register-Tasks.ps1
+
+            # Passed to the script as they are. -SleepAfter starts the SleepAfterCopy task below when the copy is done;
+            # -EncodeAfter queues the recordings in Amatsukaze first (scripts\Add-EncodeTasks.ps1).
+            Arguments = @('-DeleteAfterCopy', '-SleepAfter', '-EncodeAfter')
+
+            Triggers = @(
+                @{ Type = 'Daily'; At = '03:00' }
+
+                # Optional safety net: also start 2 minutes after the PC woke up by the timer. WakeSource is the
+                # WakeSourceText of the Power-Troubleshooter event (ID 1) in the System log; it is "ACPI Wake Alarm" on the
+                # PC this was built on and may differ on yours (check it with Get-WinEvent). Delete this line to remove it.
+                @{ Type = 'WakeEvent'; WakeSource = 'ACPI Wake Alarm'; Delay = 'PT2M' }
+            )
+
+            Settings = @{
+                WakeToRun               = $true     # wake the PC for the trigger
+                StartWhenAvailable      = $true     # run later if the start time was missed
+                RestartCount            = 3         # retries (Copy-Recordings exits with 1 while a recording is running)
+                RestartIntervalMinutes  = 10
+                ExecutionTimeLimitHours = 6
+            }
+        }
+
+        @{
+            Name   = 'SleepAfterCopy'
+            Script = 'Sleep-Computer.ps1'
+
+            # No trigger: Copy-Recordings.ps1 -SleepAfter starts it. -WaitForEncode holds the sleep back until Amatsukaze is idle.
+            Arguments = @('-WaitForEncode')
+            Triggers  = @()
+
+            Settings = @{
+                # Waiting for the encode can take up to -MaxEncodeWaitHours (12 by default) plus a few minutes, so keep this
+                # above it. Without -WaitForEncode, 1 is enough.
+                ExecutionTimeLimitHours = 14
+            }
+        }
+    )
+}

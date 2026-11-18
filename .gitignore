@@ -22,3 +22,6 @@ __pycache__/
 
 # Amatsukaze のエンコード登録用の、キーとプロファイルの対応表（encode-profiles.csv.example をコピーして作る）
 windows/amatsukaze/encode-profiles.csv
+
+# Windows のタスクスケジューラ登録用の設定（tasks.psd1.example をコピーして作る）
+windows/tasks/tasks.psd1

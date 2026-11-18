@@ -6,6 +6,7 @@
 |---|---|
 | `Copy-Recordings.ps1` | SFTPGo（REST API）から録画を PC へコピー（`-DeleteAfterCopy` で移動）。ログとメトリクスを書く |
 | `Add-EncodeTasks.ps1` | 録画フォルダの `*.m2ts` を、ファイル名のキーで選んだプロファイルで Amatsukaze のキューに登録（対応表は `../windows/amatsukaze/encode-profiles.csv`）。ログは `<データ>\logs\encode-*.log`、登録済みは `submitted.txt` |
+| `Register-Tasks.ps1` | `../windows/tasks/tasks.psd1`（`.example` をコピーして作る。Git 管理外）の定義どおりに `\MyTasks\CopyRecordings` と `\MyTasks\SleepAfterCopy` を登録する（管理者権限）。冪等。`-WhatIf` で差分だけ表示 |
 | `Install-Alloy.ps1` | Grafana Alloy の導入と設定の配置（管理者権限） |
 | `Sleep-Computer.ps1` | タスクに起こされた PC をスリープに戻す（`\MyTasks\SleepAfterCopy` タスクから起動） |
 | `../windows/alloy/config.alloy.tmpl` | Alloy の設定のテンプレート |
@@ -60,6 +61,17 @@
 - `SetSuspendState(false, false, false)`（第 1 引数 false = スリープ。休止ではない）。`rundll32 powrprof.dll,SetSuspendState` は引数の癖で休止になることがあるので使わない
 - 判定にはメディア再生などの検出を含まない
 - `-WhatIf`: 待たず、スリープもしない（復帰元の確認までは実際に行う）
+
+## Register-Tasks.ps1
+
+- 設定は `windows/tasks/tasks.psd1`（`.psd1` = PowerShell のデータファイル。`Import-PowerShellDataFile` で読む。コードは実行されず、コメントが書ける。5.1 でも動く）。`.example` をコミットし、実物は `.gitignore`（`encode-profiles.csv` と同じ扱い）。スクリプトのパスは `$PSScriptRoot` から作るので、設定にパスを書かない
+- **「足す」のではなく「完成形を組み立てて比べる」。** 設定から `New-ScheduledTask` で完成形を作り、`Get-ScheduledTask` の結果と `Get-TaskSignature`（`name=value` の行の一覧）で比べる。同じなら何もしない。違えば `Register-ScheduledTask -Force` で置き換える。差分の追加ではないので、2 回実行しても同じになり、設定からスイッチを消せば消える
+- 比べるのは、このスクリプトが決めている部分だけ（アクション、プリンシパル、設定の一部、トリガー）。Windows が自分で入れる値（登録日時、トリガーの開始日など）は含めない。**比べる項目を増やす（設定に新しい項目を足す）ときは、`Get-TaskSignature` にも足す**。足し忘れると、その項目を変えても `[unchanged]` になる
+- トリガーの種類は `Daily` と `WakeEvent`（`MSFT_TaskEventTrigger`。復帰元の `WakeSourceText` で絞る）。種類を増やすときは、`Import-TaskConfig`（検証）・`New-DesiredTask`（組み立て）・`Get-TaskSignature`（比較）の 3 か所を直す
+- 設定の検証は厳しくしてある（未知のキーはエラー）。キー名の打ち間違いが黙って無視されないようにするため
+- タスクの `Principal` は SYSTEM・最上位の権限で固定（今のタスクはすべてそうなので設定にしていない）
+- 設定にないタスク（例: `\MyTasks\` の別のタスク）は触らない。削除もしない
+- 検証した範囲（管理者権限なしで）: ①5.1 と 7 の `-WhatIf` ②設定の誤り（未知のキー、時刻の形式、スクリプトがない、`RestartCount` だけ、など）が分かるメッセージで止まる ③**現在のユーザーで使い捨てのタスクを登録して読み戻し**、2 回登録しても差分が 0 で、引数を変えると差分が出る（SYSTEM は管理者権限が要るので、プリンシパルだけ差し替えた）。実機でしか確かめられないもの: SYSTEM での登録そのもの、`WakeToRun`、復帰イベントでの実際の起動
 
 ## 検証の方法（手元でできること）
 
